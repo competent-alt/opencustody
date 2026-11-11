@@ -10,10 +10,13 @@ password derived from your recovery phrase.
 
 from __future__ import annotations
 
+import hashlib
+import http.client
 import json
 import re
 import secrets
 import socket
+import threading
 import ssl
 import subprocess  # nosec B404 - we launch one user-selected binary with a fixed argv, no shell
 import sys
@@ -45,6 +48,88 @@ def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+class WalletRpcClient:
+    """JSON-RPC client for the local monero-wallet-rpc with HTTP digest auth.
+
+    Monero's server ties each digest nonce to the TCP connection it was issued on, so the
+    challenge and the authenticated request must share one kept-alive connection. (urllib
+    sends `Connection: close` on every request, which is why it can't log in.) One connection
+    is shared under a lock; it reconnects and re-authenticates as needed.
+    """
+
+    def __init__(self, port: int, user: str, password: str):
+        self._port, self._user, self._pw = port, user, password
+        self._conn: http.client.HTTPConnection | None = None
+        self._auth: dict | None = None
+        self._nc = 0
+        self._id = 0
+        self._lock = threading.Lock()
+
+    def _digest_header(self) -> str:
+        a = self._auth
+        self._nc += 1
+        nc, cnonce = f"{self._nc:08x}", secrets.token_hex(8)
+        ha1 = hashlib.md5(f"{self._user}:{a['realm']}:{self._pw}".encode()).hexdigest()  # nosec B324 - required by HTTP digest
+        ha2 = hashlib.md5(b"POST:/json_rpc").hexdigest()  # nosec B324
+        resp = hashlib.md5(f"{ha1}:{a['nonce']}:{nc}:{cnonce}:auth:{ha2}".encode()).hexdigest()  # nosec B324
+        return (f'Digest username="{self._user}", realm="{a["realm"]}", nonce="{a["nonce"]}", uri="/json_rpc", '
+                f'algorithm=MD5, response="{resp}", qop=auth, nc={nc}, cnonce="{cnonce}"')
+
+    def _post(self, body: bytes, timeout: float) -> tuple[int, bytes, str]:
+        if self._conn is None:
+            self._conn = http.client.HTTPConnection("127.0.0.1", self._port, timeout=timeout)
+            self._auth, self._nc = None, 0  # nonces are per connection
+        self._conn.timeout = timeout
+        if self._conn.sock is not None:
+            self._conn.sock.settimeout(timeout)
+        headers = {"Content-Type": "application/json"}
+        if self._auth:
+            headers["Authorization"] = self._digest_header()
+        self._conn.request("POST", "/json_rpc", body, headers)
+        r = self._conn.getresponse()
+        data = r.read(MAX_RPC_RESPONSE + 1)
+        return r.status, data, r.getheader("WWW-Authenticate") or ""
+
+    def call(self, method: str, params=None, timeout: float = 120):
+        with self._lock:
+            self._id += 1
+            payload = {"jsonrpc": "2.0", "id": self._id, "method": method}
+            if params is not None:
+                payload["params"] = params
+            body = json.dumps(payload).encode()
+            for _attempt in range(3):
+                try:
+                    status, data, challenge = self._post(body, timeout)
+                except (OSError, http.client.HTTPException) as e:
+                    self.close()
+                    last = e
+                    continue
+                if status == 401 and challenge.lower().startswith("digest"):
+                    self._auth = dict(re.findall(r'(\w+)="?([^",]+)"?', challenge))
+                    continue
+                if status != 200:
+                    raise net.NetError(f"monero-wallet-rpc HTTP {status}")
+                if len(data) > MAX_RPC_RESPONSE:
+                    raise net.NetError("monero-wallet-rpc response too large")
+                resp = json.loads(data)
+                if resp.get("error"):
+                    err = resp["error"]
+                    raise net.NetError(f"{method}: {err.get('message', err) if isinstance(err, dict) else err}")
+                return resp.get("result")
+            raise net.NetError(f"monero-wallet-rpc not reachable ({locals().get('last', 'authentication failed')})")
+
+    def close(self) -> None:
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except OSError:
+                pass
+        self._conn, self._auth = None, None
+
+
+MAX_RPC_RESPONSE = 32 * 1024 * 1024
 
 
 class MoneroChain(Chain):
@@ -79,22 +164,22 @@ class MoneroChain(Chain):
         self._proc = subprocess.Popen(  # nosec B603 - fixed argv list, no shell
             argv,
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=flags)
-        url = f"http://127.0.0.1:{port}/json_rpc"
-        pm = urllib.request.HTTPPasswordMgrWithDefaultRealm()
-        pm.add_password(None, url, "opencustody", rpc_pw)
-        opener = urllib.request.build_opener(urllib.request.HTTPDigestAuthHandler(pm))
-        self.rpc = net.JsonRpc(url, opener=opener)
-        self._wait_ready()
-        if (wdir / wallet_name).exists():
-            self.rpc.call("open_wallet", {"filename": wallet_name, "password": wallet_pw})
-        else:
-            self.rpc.call("generate_from_keys", {
-                "filename": wallet_name, "address": self._keys.address, "spendkey": self._keys.private_spend,
-                "viewkey": self._keys.private_view, "password": wallet_pw, "restore_height": int(restore_height),
-                "autosave_current": True})
-        got = self.rpc.call("get_address", {"account_index": 0})["address"]
-        if got != self._keys.address:
-            raise RuntimeError("Monero wallet file does not match this recovery phrase.")
+        self.rpc = WalletRpcClient(port, "opencustody", rpc_pw)
+        try:
+            self._wait_ready()
+            if (wdir / wallet_name).exists():
+                self.rpc.call("open_wallet", {"filename": wallet_name, "password": wallet_pw})
+            else:
+                self.rpc.call("generate_from_keys", {
+                    "filename": wallet_name, "address": self._keys.address, "spendkey": self._keys.private_spend,
+                    "viewkey": self._keys.private_view, "password": wallet_pw, "restore_height": int(restore_height),
+                    "autosave_current": True})
+            got = self.rpc.call("get_address", {"account_index": 0})["address"]
+            if got != self._keys.address:
+                raise RuntimeError("Monero wallet file does not match this recovery phrase.")
+        except BaseException:
+            self._stop_process()  # never leave a wallet process running after a failed start
+            raise
 
     def _wait_ready(self) -> None:
         deadline = time.time() + 45
@@ -102,7 +187,7 @@ class MoneroChain(Chain):
             if self._proc.poll() is not None:
                 raise RuntimeError("monero-wallet-rpc exited; see wallet-rpc.log in the data folder.")
             try:
-                self.rpc.call("get_version")
+                self.rpc.call("get_version", timeout=5)
                 return
             except net.NetError:
                 time.sleep(0.5)
@@ -112,7 +197,7 @@ class MoneroChain(Chain):
         return self._keys.address
 
     def balance(self, asset: Asset) -> int:
-        self.rpc.call("refresh")
+        self.rpc.call("refresh", timeout=900)  # first sync can take a while
         return int(self.rpc.call("get_balance", {"account_index": 0})["balance"])
 
     def validate_address(self, addr: str) -> str | None:
@@ -126,16 +211,16 @@ class MoneroChain(Chain):
         err = self.validate_address(to)
         if err:
             raise ValueError(err)
-        self.rpc.call("refresh")
+        self.rpc.call("refresh", timeout=900)  # first sync can take a while
         try:
             if amount is None:
-                r = self.rpc.call("sweep_all", {"address": to, "account_index": 0, "do_not_relay": True,
+                r = self.rpc.call("sweep_all", timeout=300, params={"address": to, "account_index": 0, "do_not_relay": True,
                                                 "get_tx_metadata": True})
                 if len(r.get("tx_metadata_list", [])) != 1:
                     raise RuntimeError("Sweep needs more than one transaction; send in smaller amounts.")
                 meta, amt, fee = r["tx_metadata_list"][0], r["amount_list"][0], r["fee_list"][0]
             else:
-                r = self.rpc.call("transfer", {"destinations": [{"amount": amount, "address": to}],
+                r = self.rpc.call("transfer", timeout=300, params={"destinations": [{"amount": amount, "address": to}],
                                                "account_index": 0, "priority": 0, "do_not_relay": True,
                                                "get_tx_metadata": True})
                 meta, amt, fee = r["tx_metadata"], r["amount"], r["fee"]
@@ -167,12 +252,17 @@ class MoneroChain(Chain):
 
     def close(self) -> None:
         try:
-            self.rpc.call("store")
-            self.rpc.call("close_wallet")
+            self.rpc.call("store", timeout=30)
+            self.rpc.call("close_wallet", timeout=30)
         except Exception:  # nosec B110 - best-effort shutdown
             pass
-        self._proc.terminate()
-        try:
-            self._proc.wait(10)
-        except subprocess.TimeoutExpired:
-            self._proc.kill()
+        self._stop_process()
+
+    def _stop_process(self) -> None:
+        self.rpc.close()
+        if self._proc.poll() is None:
+            self._proc.terminate()
+            try:
+                self._proc.wait(10)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
