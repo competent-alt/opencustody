@@ -37,7 +37,8 @@ def main() -> None:
         except Exception:  # nosec B110 - window may be closing
             pass
 
-    api.on_locked = on_locked
+    api._on_locked = on_locked
+    api._window = window
     window.events.closed += lambda: api.lock()
     # http_server: serve web/ from a private 127.0.0.1 port so the CSP's 'self' works.
     # private_mode: no cookies, cache or local storage persisted to disk.

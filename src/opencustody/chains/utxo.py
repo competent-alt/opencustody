@@ -93,6 +93,22 @@ def select_coins(utxos: list[Utxo], amount: int | None, rate: int) -> tuple[list
     raise InsufficientFunds("Not enough confirmed funds for amount plus fee.")
 
 
+def spend_exactly(coins: list[Utxo], amount: int | None, rate: int) -> tuple[list[Utxo], int, int]:
+    """Coin control: spend every selected coin (no more, no fewer). Returns (inputs, send amount, change)."""
+    total = sum(u.value for u in coins)
+    if amount is None:
+        send = total - vsize(len(coins), 1) * rate
+        if send < DUST:
+            raise InsufficientFunds("Selected coins don't cover the fee.")
+        return coins, send, 0
+    change = total - amount - vsize(len(coins), 2) * rate
+    if change >= DUST:
+        return coins, amount, change
+    if total >= amount + vsize(len(coins), 1) * rate:
+        return coins, amount, 0  # leftover below dust goes to the fee
+    raise InsufficientFunds("Selected coins don't cover the amount plus fee.")
+
+
 def build_signed_tx(keyring, coin: str, inputs: list[Utxo], outputs: list[tuple[Script, int]]) -> Transaction:
     vin = [TransactionInput(bytes.fromhex(u.txid), u.vout, sequence=0xFFFFFFFD) for u in inputs]  # RBF on
     vout = [TransactionOutput(v, s) for s, v in outputs]
@@ -183,14 +199,37 @@ class UtxoChain(Chain):
             raise RuntimeError(f"Fee estimate {rate} sat/vB looks wrong; refusing.")
         return rate
 
-    def prepare_send(self, asset: Asset, to: str, amount: int | None) -> PreparedTx:
+    supports_coin_control = True
+
+    def coins(self, asset: Asset) -> list[dict]:
+        """Spendable (confirmed) coins, for coin control."""
+        self._scan()
+        addr = {(c, i): a for c, i, a in self._used}
+        return [{"id": f"{u.txid}:{u.vout}", "txid": u.txid, "vout": u.vout, "value": u.value,
+                 "address": addr[(u.change, u.index)], "change": bool(u.change)}
+                for u in sorted(self._utxos(), key=lambda u: u.value, reverse=True)]
+
+    def prepare_send(self, asset: Asset, to: str, amount: int | None, coins: list[str] | None = None) -> PreparedTx:
         to = to.strip()
         dest = address_to_script(to, self.coin)
         if amount is not None and amount < DUST:
             raise ValueError(f"Amount below dust limit ({DUST} sats).")
         self._scan()
         rate = self._fee_rate()
-        inputs, send_amt, change = select_coins(self._utxos(), amount, rate)
+        available = self._utxos()
+        if coins:
+            wanted = set(coins)
+            chosen = [u for u in available if f"{u.txid}:{u.vout}" in wanted]
+            if len(chosen) != len(wanted):
+                raise ValueError("Some selected coins are no longer spendable. Refresh and pick again.")
+            inputs, send_amt, change = spend_exactly(chosen, amount, rate)
+        else:
+            inputs, send_amt, change = select_coins(available, amount, rate)
+        warnings = []
+        n_addr = len({(u.change, u.index) for u in inputs})
+        if n_addr > 1:
+            warnings.append(f"This spends coins from {n_addr} of your addresses, which links them together "
+                            "on-chain. Use coin control to avoid that.")
         outputs = [(dest, send_amt)]
         if change:
             change_addr = self._addr(1, self._next[1])
@@ -203,7 +242,7 @@ class UtxoChain(Chain):
             return net.post_text(f"{self.api}/tx", raw).strip()
 
         return PreparedTx(self.name, asset, self.address(), to, send_amt, fee, f"({rate} sat/vB)",
-                          self.native, send)
+                          self.native, send, warnings)
 
     def history(self, asset: Asset, limit: int = 25) -> list[HistoryItem]:
         self._scan()

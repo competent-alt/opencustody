@@ -13,6 +13,12 @@ from .paths import atomic_write, config_path
 
 DEFAULTS: dict = {
     "auto_lock_minutes": 10,
+    # Route every request through Tor (or another SOCKS5 proxy). Fail-closed: if the proxy is
+    # down, nothing is sent. Tor Browser listens on 9150, the tor service on 9050.
+    "tor": {"enabled": False, "proxy": "127.0.0.1:9050"},
+    # Privacy mode: no price lookups, no third-party history indexers, balances hidden on screen,
+    # explorer links copied instead of opened in your normal browser.
+    "privacy": {"mode": False, "hide_balances": False},
     "prices": {"enabled": True, "api": "https://api.coingecko.com/api/v3"},
     # Optional free key from etherscan.io: enables transaction history on every EVM chain.
     "etherscan_api_key": "",

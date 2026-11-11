@@ -175,13 +175,51 @@ function showPassword() {
 const S = {
   accounts: [], bal: {}, cur: null, notes: [], monero: 'off', moneroErr: '', gen: 0,
   page: 'home', pf: { active: 0, items: [] }, prices: null, pricesOff: false, priceErr: '',
-  hist: {}, histFilter: 'all', histAsset: null, hover: null,
+  hist: {}, histFilter: 'all', histAsset: null, hover: null, priv: null, pricesPrivacy: false,
 };
 
 async function enterApp() {
   $('#onboard').hidden = true;
   $('#app').hidden = false;
+  await loadPrivacy();
   await loadPortfolio();
+}
+
+/* ---- privacy state ---- */
+async function loadPrivacy() {
+  try { S.priv = await call('privacy_status'); } catch (e) { toast(e.message); return; }
+  applyPrivacyUI();
+}
+function privacyScore(p) {
+  if (!p) return 0;
+  const own = p.endpoints.filter(e => e.own).length / Math.max(p.endpoints.length, 1);
+  return Math.round(
+    (p.tor_enabled ? 40 : 0) + (p.mode ? 20 : 0) + (p.monero_enabled ? 15 : 0) + (p.hide_balances ? 5 : 0) + own * 20);
+}
+function applyPrivacyUI() {
+  const p = S.priv; if (!p) return;
+  document.body.classList.toggle('hide-bal', p.hide_balances);
+  const hb = $('#hideBtn');
+  hb.classList.toggle('on', p.hide_balances);
+  hb.replaceChildren(icon(p.hide_balances ? 'i-eyeoff' : 'i-eye'));
+  hb.title = p.hide_balances ? 'Show balances' : 'Hide balances';
+  const rp = $('#routePill');
+  rp.textContent = p.tor_enabled ? 'Tor' : 'Direct';
+  rp.classList.toggle('tor', p.tor_enabled);
+  rp.title = p.tor_enabled ? `All traffic goes through Tor (${p.tor_proxy}), one circuit per portfolio` : 'Traffic goes directly from your IP. Click to turn on Tor.';
+  $('#privScore').textContent = privacyScore(p);
+}
+async function setPrivacy(opts) {
+  const r = await call('set_privacy', opts);
+  if ('mode' in opts) S.hist = {};  // history availability depends on privacy mode
+  await loadPrivacy();
+  if (r.reloaded) { await loadPortfolio(); go('privacy'); }
+  else if (S.page === 'home' || S.page === 'history') { loadPrices(); renderPage(); }
+  return r;
+}
+async function openLink(url) {
+  const r = await call('open_url', url);
+  if (r.copy) copyText(r.copy, 'Link copied. Privacy mode: open it in Tor Browser');
 }
 
 async function loadPortfolio() {
@@ -206,7 +244,7 @@ async function loadPortfolios() {
 async function loadPrices() {
   try {
     const r = await call('prices');
-    S.pricesOff = !r.enabled; S.prices = r.prices; S.priceErr = '';
+    S.pricesOff = !r.enabled; S.pricesPrivacy = !!r.privacy; S.prices = r.enabled ? r.prices : null; S.priceErr = '';
   } catch (e) { S.priceErr = e.message; }
   if (S.page === 'home') scheduleHome();
 }
@@ -249,6 +287,7 @@ function go(page, opts) {
   if (page === 'history') S.histAsset = opts && opts.asset || null;
   $('#navHome').classList.toggle('on', page === 'home');
   $('#navHistory').classList.toggle('on', page === 'history');
+  $('#navPrivacy').classList.toggle('on', page === 'privacy');
   $('#topHistory').classList.toggle('on', page === 'history');
   for (const b of document.querySelectorAll('#accts .acct')) b.classList.toggle('active', page === 'asset' && b.dataset.id === S.cur);
   renderPage();
@@ -258,6 +297,7 @@ function select(id) { S.cur = id; go('asset'); }
 function renderPage() {
   if (S.page === 'home') renderHome();
   else if (S.page === 'history') renderHistory();
+  else if (S.page === 'privacy') renderPrivacy();
   else renderAsset();
 }
 
@@ -279,21 +319,24 @@ function renderSidebar() {
     if (!groups.has(a.network)) groups.set(a.network, []);
     groups.get(a.network).push(a);
   }
-  for (const [net, list] of groups) {
-    nav.append(h('div', { class: 'group-label', text: net }));
+  // Monero first: it's the only network here that is private by default.
+  const moneroLabel = () => h('div', { class: 'group-label' }, 'Monero', h('span', { class: 'tag-private', text: 'private' }));
+  if (!S.accounts.some(a => a.network === 'Monero') && (!q || 'monero xmr'.includes(q))) {
+    nav.append(moneroLabel());
+    const sub = { off: 'set up', idle: 'starting', starting: null, error: 'error', on: '' }[S.monero];
+    nav.append(h('button', { class: 'acct', onclick: openMoneroSetup },
+      h('span', { class: 'sym', text: 'XMR' }), h('span', { class: 'nm' }, 'XMR'),
+      S.monero === 'starting' ? thinking(true) : h('span', { class: 'bal', text: sub || '' })));
+  }
+  const ordered = [...groups].sort(([x], [y]) => (y === 'Monero') - (x === 'Monero'));
+  for (const [net, list] of ordered) {
+    nav.append(net === 'Monero' ? moneroLabel() : h('div', { class: 'group-label', text: net }));
     for (const a of list) {
       nav.append(h('button', { class: 'acct' + (S.page === 'asset' && a.id === S.cur ? ' active' : ''), 'data-id': a.id, onclick: () => select(a.id) },
         h('span', { class: 'sym', text: symBadge(a.symbol) }),
         h('span', { class: 'nm' }, a.symbol, a.token ? h('small', { text: 'token' }) : null),
         balNode(a.id, true)));
     }
-  }
-  if (!S.accounts.some(a => a.network === 'Monero') && (!q || 'monero xmr'.includes(q))) {
-    nav.append(h('div', { class: 'group-label', text: 'Monero' }));
-    const sub = { off: 'set up', idle: 'starting', starting: null, error: 'error', on: '' }[S.monero];
-    nav.append(h('button', { class: 'acct', onclick: openSettings },
-      h('span', { class: 'sym', text: 'XMR' }), h('span', { class: 'nm' }, 'XMR'),
-      S.monero === 'starting' ? thinking(true) : h('span', { class: 'bal', text: sub || '' })));
   }
   if (!nav.children.length) nav.append(h('div', { class: 'empty-history', text: 'No matching assets' }));
 }
@@ -450,7 +493,9 @@ function renderHome() {
   const { total, out } = slices();
   let chart;
   if (S.pricesOff) {
-    chart = h('div', { class: 'empty', text: 'Prices are turned off in Settings, so values and the chart are hidden. Balances are in the sidebar.' });
+    chart = h('div', { class: 'empty', text: S.pricesPrivacy
+      ? 'Privacy mode is on, so no price service is contacted and the value chart is hidden. Balances are in the sidebar.'
+      : 'Prices are turned off in the config, so values and the chart are hidden. Balances are in the sidebar.' });
   } else if (!S.prices) {
     chart = h('div', { class: 'empty' }, S.priceErr ? `Couldn't load prices: ${S.priceErr}` : thinking());
   } else if (!out.length) {
@@ -472,6 +517,11 @@ function renderHome() {
     chart.querySelectorAll('.leg').forEach((r, i) => { r.querySelector('.sw').style.background = out[i].color; });
   }
   v.replaceChildren(
+    S.monero === 'off' ? h('button', { class: 'banner', onclick: openMoneroSetup },
+      h('span', { class: 'ic' }, icon('i-shield')),
+      h('span', { class: 'meta' }, h('b', { text: 'Private payments: set up Monero' }),
+        h('span', { text: 'Amounts, senders and receivers are hidden on-chain by default, unlike every other network here.' })),
+      icon('i-right')) : null,
     h('div', { class: 'home-top' }, h('div', { class: 'label', text: 'Portfolio' }),
       h('div', { class: 'balance' }, S.prices && !S.pricesOff ? usd(total) : (p ? p.name : ''),
         stillLoading && S.prices ? h('span', {}, thinking(true)) : null)),
@@ -502,7 +552,7 @@ function renderAsset() {
       h('button', { class: 'btn primary lg', onclick: () => openSend(a) }, icon('i-up'), 'Send'),
       h('button', { class: 'btn lg', onclick: () => copyText(addr) }, icon('i-copy'), 'Copy address'),
       h('button', { class: 'btn lg', onclick: () => go('history', { asset: a.id }) }, icon('i-clock'), 'History'),
-      h('button', { class: 'btn lg', onclick: () => API.explorer(a.id) }, icon('i-ext'), 'Explorer'),
+      h('button', { class: 'btn lg', onclick: async () => { const r = await call('explorer', a.id); if (r.copy) copyText(r.copy, 'Link copied. Privacy mode: open it in Tor Browser'); } }, icon('i-ext'), 'Explorer'),
       h('button', { class: 'btn lg ghost', title: 'Refresh balance', onclick: () => refreshOne(a.id) }, icon('i-refresh'))),
     h('div', { class: 'code' },
       h('div', { class: 'code-head' }, h('span', { text: `RECEIVE ADDRESS · ${a.network.toUpperCase()}` }),
@@ -559,7 +609,7 @@ function txRow(it) {
   const title = it.dir === 'in' ? 'Received' : it.dir === 'out' ? 'Sent' : it.dir === 'self' ? 'Moved between own addresses' : 'Transaction';
   const sign = it.dir === 'in' ? '+' : it.dir === 'out' ? '−' : '';
   const p = price(it.symbol), n = parseFloat(it.amount);
-  return h('button', { class: 'tx ' + it.dir, title: 'Open in block explorer', onclick: () => API.open_url(it.url) },
+  return h('button', { class: 'tx ' + it.dir, title: 'Open in block explorer', onclick: () => openLink(it.url) },
     h('span', { class: 'ic' }, icon(dirIcon)),
     h('span', { class: 'meta' },
       h('span', { class: 't' }, `${title} ${it.symbol}`,
@@ -630,22 +680,146 @@ async function refreshAll() {
   // Networks in parallel, assets within a network one by one (kinder to public APIs).
   await Promise.all([...byNet.values()].map(async ids => { for (const id of ids) await refreshOne(id); }));
   btn.classList.remove('busy');
+  if (S.priv && S.priv.tor_enabled && S.accounts.length && S.accounts.every(a => S.bal[a.id] === 'error')) {
+    toast(`Can't reach Tor at ${S.priv.tor_proxy}. Nothing was sent. Start Tor or turn routing off in Privacy.`);
+  }
 }
 
-async function copyText(text) {
+async function copyText(text, msg) {
   try { await navigator.clipboard.writeText(text); }
   catch {
     const ta = h('textarea', { value: text }); document.body.append(ta); ta.select();
     document.execCommand('copy'); ta.remove();
   }
-  toast('Address copied');
+  toast(msg || 'Address copied');
 }
 
 async function lockNow(msg) {
   closeModal(); togglePf(false);
-  S.gen++; S.accounts = []; S.bal = {}; S.cur = null; S.hist = {}; S.prices = null;
+  S.gen++; S.accounts = []; S.bal = {}; S.cur = null; S.hist = {}; S.prices = null; S.priv = null; document.body.classList.remove('hide-bal');
   try { await call('lock'); } catch { /* already locked */ }
   showUnlock(msg);
+}
+
+/* ---- privacy page ---- */
+function sw(on, onToggle, disabled) {
+  const b = h('button', { class: 'switch' + (on ? ' on' : ''), role: 'switch', 'aria-checked': String(!!on), disabled: !!disabled });
+  b.onclick = async () => {
+    b.disabled = true;
+    try { await onToggle(!on); } catch (e) { toast(e.message); }
+    b.disabled = false;
+  };
+  return b;
+}
+function card(on, ic, title, desc, control, body) {
+  return h('div', { class: 'card' + (on ? ' on' : '') },
+    h('div', { class: 'card-top' }, h('span', { class: 'ic' }, icon(ic)),
+      h('div', { class: 'meta' }, h('b', {}, title), h('span', { text: desc })), control || null),
+    body ? h('div', { class: 'card-body' }, body) : null);
+}
+
+function renderPrivacy() {
+  if (S.page !== 'privacy') return;
+  $('#netTitle').textContent = 'Privacy';
+  const p = S.priv;
+  if (!p) { $('#view').replaceChildren(thinking()); loadPrivacy().then(renderPrivacy); return; }
+  const score = privacyScore(p), C = 2 * Math.PI * 46;
+  const ring = h('div', { class: 'score-ring' });
+  ring.innerHTML = '<svg viewBox="0 0 108 108"><circle class="bg" cx="54" cy="54" r="46"/><circle class="fg" cx="54" cy="54" r="46"/></svg>';
+  ring.querySelector('.fg').setAttribute('stroke-dasharray', `${(score / 100) * C} ${C}`);
+  ring.append(h('div', { class: 'num' }, h('div', {}, String(score), h('small', { text: 'privacy' }))));
+
+  // Tor
+  const proxyIn = h('input', { value: p.tor_proxy, spellcheck: 'false', placeholder: '127.0.0.1:9050' });
+  const torResult = h('div', { class: 'ok-line' });
+  const testBtn = h('button', { class: 'btn' }, icon('i-onion'), 'Test connection');
+  testBtn.onclick = async () => {
+    testBtn.disabled = true; torResult.className = 'ok-line'; torResult.replaceChildren(thinking(true), ' asking check.torproject.org through the proxy…');
+    try {
+      const r = await call('test_tor', proxyIn.value.trim());
+      torResult.className = 'ok-line' + (r.is_tor ? ' good' : '');
+      torResult.textContent = r.is_tor ? `✓ Connected through Tor. Exit IP ${r.ip} (not yours).` : `Connected, but this proxy is NOT Tor (exit IP ${r.ip}).`;
+    } catch (e) { torResult.textContent = e.message; }
+    testBtn.disabled = false;
+  };
+  const saveProxy = h('button', { class: 'btn', onclick: async () => {
+    try { await setPrivacy({ tor_proxy: proxyIn.value.trim() }); toast('Proxy saved'); renderPrivacy(); } catch (e) { toast(e.message); }
+  } }, 'Save');
+  const torCard = card(p.tor_enabled, 'i-onion', 'Route everything through Tor',
+    p.tor_enabled ? 'On. Balances, history, prices, broadcasts and Monero go through Tor; if Tor is down, nothing is sent.'
+      : 'Off. Every service you query sees your IP address.',
+    sw(p.tor_enabled, async v => { await setPrivacy({ tor_enabled: v }); toast(v ? 'Tor routing on' : 'Tor routing off'); renderPrivacy(); }),
+    [h('div', { class: 'row-inline' }, proxyIn, saveProxy, testBtn), torResult,
+      h('ul', { class: 'tips' },
+        h('li', {}, h('b', { text: 'Separate circuit per portfolio. ' }), 'Each portfolio gets its own Tor circuit and exit IP, so services can\'t link your portfolios by IP. Prices use a third circuit that never carries addresses.'),
+        h('li', {}, 'Run Tor Browser (port ', h('code', { text: '9150' }), ') or the tor service (port ', h('code', { text: '9050' }), '). DNS lookups go through Tor too.'),
+        h('li', {}, 'Your own node\'s ', h('code', { text: '.onion' }), ' address works as an endpoint while Tor is on.'))]);
+
+  const modeCard = card(p.mode, 'i-shield', 'Privacy mode',
+    'No price lookups, no third-party transaction-history indexers, explorer links are copied instead of opened in your normal browser.',
+    sw(p.mode, async v => { await setPrivacy({ mode: v }); toast(v ? 'Privacy mode on' : 'Privacy mode off'); renderPrivacy(); }));
+  const hideCard = card(p.hide_balances, 'i-eyeoff', 'Hide balances on screen',
+    'Blurs amounts and values against shoulder-surfing and screen sharing. Toggle quickly with the eye in the top bar.',
+    sw(p.hide_balances, async v => { await setPrivacy({ hide_balances: v }); renderPrivacy(); }));
+  const xmrCard = card(p.monero_enabled, 'i-shield', h('span', {}, 'Monero', h('span', { class: 'tag-private', text: 'private' })),
+    p.monero_enabled ? `Set up (${{ on: 'running', starting: 'starting', idle: 'not started', error: 'error', off: 'off' }[p.monero_state] || p.monero_state}). Use XMR when you need payments that don't expose amounts or parties.`
+      : 'Not set up. Monero hides sender, receiver and amount on-chain by default; every other network here is fully public.',
+    h('button', { class: 'btn' + (p.monero_enabled ? '' : ' primary'), onclick: openMoneroSetup }, p.monero_enabled ? 'Settings' : 'Set up'));
+  const ownCount = p.endpoints.filter(e => e.own).length;
+  const epCard = card(ownCount === p.endpoints.length, 'i-file', 'Your own nodes',
+    `${ownCount} of ${p.endpoints.length} networks use your own endpoint. Public endpoints see which addresses you check (Tor hides who you are, not what you query).`,
+    h('button', { class: 'btn', onclick: () => API.open_config() }, 'Edit config'),
+    h('div', { class: 'ep-list' }, p.endpoints.map(e => h('div', { class: 'ep' },
+      h('span', { text: e.network }), h('span', { class: 'h', text: e.host }),
+      h('span', { class: 'pill' + (e.own ? ' own' : ''), text: e.own ? 'your node' : 'public' })))));
+  const habits = card(true, 'i-coins', 'Good habits built in', 'Things the wallet already does for you, and a few to do yourself.', null,
+    h('ul', { class: 'tips' },
+      h('li', {}, h('b', { text: 'Fresh Bitcoin/Litecoin addresses: ' }), 'the receive address changes after each use, and change goes to new addresses.'),
+      h('li', {}, h('b', { text: 'Coin control: ' }), 'when sending BTC/LTC, choose which coins to spend; you are warned whenever a send would link several of your addresses.'),
+      h('li', {}, h('b', { text: 'Portfolios: ' }), 'keep separate purposes in separate portfolios. They share no addresses, and with Tor on, no IP either. Never move coins between them directly; that links them on-chain.'),
+      h('li', {}, h('b', { text: 'Account-based chains ' }), '(Ethereum, Solana, Tron, TON) use one public address per portfolio, so everything sent to it is visible to anyone.')));
+  $('#view').replaceChildren(
+    h('div', { class: 'priv-head' }, ring, h('div', {},
+      h('h2', { text: score >= 80 ? 'Strong privacy' : score >= 50 ? 'Decent privacy' : 'Basic privacy' }),
+      h('p', { text: 'Your keys never leave this computer, but by default the services you query see your IP and addresses. These settings reduce what they learn.' }))),
+    h('div', { class: 'cards' }, torCard, modeCard, xmrCard, epCard, hideCard, habits));
+}
+
+/* ---- Monero setup ---- */
+async function openMoneroSetup() {
+  let p = S.priv;
+  try { p = S.priv = await call('privacy_status'); } catch { /* keep cached */ }
+  const path = h('input', { class: 'mono', value: p ? p.monero_rpc : '', placeholder: 'C:\\monero\\monero-wallet-rpc.exe', spellcheck: 'false' });
+  const daemon = h('input', { class: 'mono', value: p ? p.monero_daemon : '', placeholder: 'your-node.example:18089  or  abc…xyz.onion:18081', spellcheck: 'false' });
+  const height = h('input', { class: 'mono', value: p && p.monero_restore_height ? String(p.monero_restore_height) : '', placeholder: '0', inputmode: 'numeric' });
+  const err = h('div', { class: 'form-err' });
+  const browse = h('button', { class: 'btn', type: 'button', onclick: async () => {
+    try { const r = await call('pick_file'); if (r.path) path.value = r.path; } catch (e) { err.textContent = e.message; }
+  } }, 'Browse…');
+  const save = h('button', { class: 'btn primary' }, 'Save & start Monero', icon('i-check'));
+  save.onclick = async () => {
+    save.disabled = true; err.replaceChildren(thinking(true), ' saving…');
+    try {
+      await call('monero_setup', path.value, daemon.value, height.value || 0, true);
+      closeModal(); await loadPrivacy(); await loadAccounts(); renderSidebar(); renderPage();
+      toast('Starting Monero…'); startMonero();
+    } catch (e) { err.textContent = e.message; save.disabled = false; }
+  };
+  const disable = p && p.monero_enabled ? h('button', { class: 'btn left', onclick: async () => {
+    try { await call('monero_setup', '', daemon.value || '', 0, false); closeModal(); await loadPrivacy(); await loadAccounts(); renderSidebar(); renderPage(); }
+    catch (e) { err.textContent = e.message; }
+  } }, 'Turn off') : null;
+  openModal(mHead('i-shield', 'Set up Monero', h('span', { class: 'tag-private', text: 'private' })),
+    h('div', { class: 'm-body' },
+      h('p', { class: 'note' }, 'OpenCustody uses the official Monero wallet to build Monero transactions, so the privacy-critical cryptography is the reference implementation. ',
+        '1) Download the Monero CLI from ', h('code', { text: 'getmonero.org/downloads' }), ' and verify its hash. ',
+        '2) Pick its ', h('code', { text: 'monero-wallet-rpc' }), ' program below. 3) Enter a node. Your own is best; a remote node can\'t spend your coins but does see your IP unless Tor is on.'),
+      h('div', { class: 'field' }, h('label', {}, 'monero-wallet-rpc program'), h('div', { class: 'row-inline' }, path, browse)),
+      h('div', { class: 'field' }, h('label', {}, 'Node address', h('em', { text: S.priv && S.priv.tor_enabled ? 'via Tor' : 'direct' })), daemon),
+      h('div', { class: 'field' }, h('label', {}, 'Restore height', h('em', { text: 'optional' })), height,
+        h('div', { class: 'hint', text: 'Wallets created here work it out automatically. For an older phrase, use a block from before your first XMR transaction (0 scans everything, which is slow).' })),
+      err),
+    h('div', { class: 'm-foot' }, disable, h('button', { class: 'btn', onclick: closeModal }, 'Cancel'), save));
 }
 
 /* ---------------- Modals ---------------- */
@@ -660,7 +834,7 @@ const mHead = (ic, title, extra) => h('div', { class: 'm-head' }, h('h2', {}, ic
   h('button', { class: 'icon-btn', title: 'Close (Esc)', onclick: closeModal }, icon('i-x')));
 
 function openSend(a, prev) {
-  prev = prev || { to: '', amount: '', max: false };
+  prev = prev || { to: '', amount: '', max: false, coins: [] };
   const to = h('input', { class: 'mono', placeholder: `${a.network} address`, spellcheck: 'false', autocomplete: 'off', value: prev.to });
   const toHint = h('div', { class: 'hint' });
   const amt = h('input', { class: 'mono', placeholder: '0.00', inputmode: 'decimal', autocomplete: 'off', value: prev.amount });
@@ -684,16 +858,51 @@ function openSend(a, prev) {
     }, 300);
   };
   to.addEventListener('input', validate);
+  // Coin control (BTC/LTC): pick exactly which coins to spend, so unrelated coins aren't linked.
+  const sel = new Set(prev.coins || []);
+  const ccBox = h('div', { hidden: !sel.size });
+  const ccSum = h('div', { class: 'cc-sum' });
+  let ccCoins = null;
+  const ccSync = () => {
+    if (!ccCoins) return;
+    const picked = ccCoins.filter(c => sel.has(c.id));
+    const total = picked.reduce((s, c) => s + parseFloat(c.amount), 0);
+    ccSum.textContent = picked.length
+      ? `${picked.length} selected · ${+total.toFixed(8)} ${a.symbol} · from ${new Set(picked.map(c => c.address)).size} address(es)`
+      : 'Nothing selected: coins are chosen automatically.';
+  };
+  const ccLoad = async () => {
+    ccBox.hidden = false;
+    if (ccCoins) return;
+    ccBox.replaceChildren(h('div', { class: 'cc-sum' }, thinking(true), ' loading coins…'));
+    try {
+      ccCoins = (await call('coins', a.id)).coins;
+      ccBox.replaceChildren(
+        ccCoins.length ? h('div', { class: 'cc-list' }, ccCoins.map(c => {
+          const cb = h('input', { type: 'checkbox' }); cb.checked = sel.has(c.id);
+          cb.onchange = () => { cb.checked ? sel.add(c.id) : sel.delete(c.id); ccSync(); };
+          return h('label', { class: 'cc-row' }, cb,
+            h('span', { class: 'a', text: `${short(c.address)}${c.change ? ' · change' : ''} · ${c.txid.slice(0, 8)}:${c.vout}` }),
+            h('span', { class: 'v', text: `${c.amount} ${a.symbol}` }));
+        })) : h('div', { class: 'cc-sum', text: 'No confirmed coins to spend.' }),
+        ccSum);
+      ccSync();
+    } catch (e) { ccBox.replaceChildren(h('div', { class: 'cc-sum', text: e.message })); }
+  };
+  const ccField = a.coin_control ? h('div', { class: 'field' },
+    h('button', { class: 'cc-toggle', type: 'button', onclick: () => (ccBox.hidden ? ccLoad() : (ccBox.hidden = true)) },
+      icon('i-coins'), 'Coin control: choose which coins to spend'), ccBox) : null;
+  if (sel.size && a.coin_control) setTimeout(ccLoad);
   const review = h('button', { class: 'btn primary' }, 'Review', icon('i-right'));
   const cancel = h('button', { class: 'btn', onclick: closeModal }, 'Cancel');
   review.onclick = async () => {
-    const state = { to: to.value.trim(), amount: amt.value.trim(), max };
+    const state = { to: to.value.trim(), amount: amt.value.trim(), max, coins: [...sel] };
     if (!state.to) { err.textContent = 'Enter a recipient address.'; return; }
     if (!max && !state.amount) { err.textContent = 'Enter an amount.'; return; }
     review.disabled = cancel.disabled = true;
     err.replaceChildren(thinking(true), ' Building and signing on this computer…');
     try {
-      const r = await call('prepare_send', a.id, state.to, state.amount, max);
+      const r = await call('prepare_send', a.id, state.to, state.amount, max, state.coins.length ? state.coins : null);
       showConfirm(a, r, state);
     } catch (e) { err.textContent = e.message; review.disabled = cancel.disabled = false; }
   };
@@ -704,6 +913,7 @@ function openSend(a, prev) {
       h('div', { class: 'field' }, h('label', {}, 'To', h('em', { text: a.network })), to, toHint),
       h('div', { class: 'field' }, h('label', {}, 'Amount', h('em', { text: bal && bal !== '…' ? `Balance: ${bal} ${a.symbol}` : '' })),
         h('div', { class: 'amount-row' }, amt, a.max ? h('div', { class: 'seg' }, segA, segM) : null)),
+      ccField,
       h('div', { class: 'err' }, `Only send to a ${a.network} address. Transactions can't be reversed.`),
       err),
     h('div', { class: 'm-foot' }, cancel, review));
@@ -740,7 +950,7 @@ function showSent(a, res) {
         h('p', { class: 'note', text: 'It will appear on the network shortly. Transaction ID:' }),
         h('code', { class: 'sel mono-val', text: res.txid }))),
     h('div', { class: 'm-foot' },
-      h('button', { class: 'btn left', onclick: () => API.open_url(res.url) }, icon('i-ext'), 'View in explorer'),
+      h('button', { class: 'btn left', onclick: () => openLink(res.url) }, icon('i-ext'), 'View in explorer'),
       h('button', { class: 'btn primary', onclick: () => { closeModal(); setTimeout(() => refreshOne(a.id), 3000); } }, 'Done')));
 }
 
@@ -777,6 +987,9 @@ $('#lockBtn').onclick = () => lockNow();
 $('#settingsBtn').onclick = openSettings;
 $('#navHome').onclick = () => go('home');
 $('#navHistory').onclick = () => go('history');
+$('#navPrivacy').onclick = () => go('privacy');
+$('#routePill').onclick = () => go('privacy');
+$('#hideBtn').onclick = () => setPrivacy({ hide_balances: !(S.priv && S.priv.hide_balances) }).catch(e => toast(e.message));
 $('#topHistory').onclick = () => go('history');
 $('#pfBtn').onclick = e => { e.stopPropagation(); togglePf(); };
 document.addEventListener('mousedown', e => { if (!e.target.closest('#pfDD, #pfBtn')) togglePf(false); });

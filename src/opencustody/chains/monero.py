@@ -14,13 +14,14 @@ import json
 import re
 import secrets
 import socket
+import ssl
 import subprocess  # nosec B404 - we launch one user-selected binary with a fixed argv, no shell
 import sys
 import time
 import urllib.request
 from pathlib import Path
 
-from .. import net
+from .. import net, socks
 from ..paths import monero_dir
 from .base import Asset, Chain, HistoryItem, InsufficientFunds, PreparedTx
 
@@ -30,8 +31,13 @@ DAEMON_RE = re.compile(r"^(https?://)?[A-Za-z0-9.\-]+(:\d{1,5})?/?$")
 
 def daemon_height(daemon: str) -> int:
     url = daemon if daemon.startswith("http") else "http://" + daemon
-    req = urllib.request.Request(url.rstrip("/") + "/get_height", headers={"User-Agent": "OpenCustody"})
-    with urllib.request.urlopen(req, timeout=20) as r:  # nosec B310 - daemon URL validated by DAEMON_RE
+    req = urllib.request.Request(url.rstrip("/") + "/get_height", headers={"User-Agent": "Mozilla/5.0"})
+    px = net.proxy()
+    if px:  # through Tor too (fail-closed)
+        r = socks.opener(px, ssl.create_default_context(), "oc-monero", "monero").open(req, timeout=60)
+    else:
+        r = urllib.request.urlopen(req, timeout=20)  # nosec B310 - daemon URL validated by DAEMON_RE
+    with r:
         return int(json.loads(r.read(100_000))["height"])
 
 
@@ -64,10 +70,14 @@ class MoneroChain(Chain):
         port = _free_port()
         wdir = monero_dir()
         flags = 0x08000000 if sys.platform == "win32" else 0  # CREATE_NO_WINDOW
+        argv = [str(path), "--rpc-bind-ip", "127.0.0.1", "--rpc-bind-port", str(port),
+                "--rpc-login", f"opencustody:{rpc_pw}", "--wallet-dir", str(wdir),
+                "--daemon-address", daemon, "--log-file", str(wdir / "wallet-rpc.log"), "--max-log-files", "2"]
+        px = net.proxy()
+        if px:
+            argv += ["--proxy", f"{px[0]}:{px[1]}"]  # wallet <-> node traffic through Tor
         self._proc = subprocess.Popen(  # nosec B603 - fixed argv list, no shell
-            [str(path), "--rpc-bind-ip", "127.0.0.1", "--rpc-bind-port", str(port),
-             "--rpc-login", f"opencustody:{rpc_pw}", "--wallet-dir", str(wdir),
-             "--daemon-address", daemon, "--log-file", str(wdir / "wallet-rpc.log"), "--max-log-files", "2"],
+            argv,
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=flags)
         url = f"http://127.0.0.1:{port}/json_rpc"
         pm = urllib.request.HTTPPasswordMgrWithDefaultRealm()

@@ -18,6 +18,8 @@
     ['trx:1', 'Tron', 'USDT', 'TRX', 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t', 'TUEZSdKsoDHQMeZwihtdoBiN46zxhGWYdH', false, '8248.535785'],
     ['ton:0', 'TON', 'TON', 'TON', null, 'UQAzWZa6nM5mJev91wGc7VCSfBoIsYRqKJpV78N8Add9-RKY', false, '0'],
   ].map(([id, network, symbol, native, token, address, max, bal]) => ({ id, network, symbol, native, token, address, max, bal }));
+  const priv = { tor_enabled: false, tor_proxy: '127.0.0.1:9150', mode: false, hide_balances: false, monero_enabled: false,
+    monero_state: 'off', monero_rpc: '', monero_daemon: '', monero_restore_height: 0 };
   const pf = { active: 0, items: [{ n: 0, name: 'Main' }, { n: 1, name: 'Savings' }] };
   const PRICES = { BTC: { usd: 74239, change24h: 1.8 }, LTC: { usd: 51.28, change24h: -0.6 }, ETH: { usd: 2078, change24h: 2.4 },
     SOL: { usd: 84.85, change24h: -1.2 }, TRX: { usd: 0.3163, change24h: 0.3 }, TON: { usd: 1.21, change24h: -2.1 },
@@ -32,7 +34,7 @@
     save_wallet: async (a, b) => { await wait(700); if (a !== b) return { ok: false, error: "Passwords don't match." }; vault = unlocked = true; return ok(); },
     unlock: async pw => { await wait(600); if (pw !== 'password123') return { ok: false, error: 'Wrong password (mock password is password123).' }; unlocked = true; return ok(); },
     lock: async () => { unlocked = false; return ok(); },
-    accounts: async () => ok({ accounts: A.map(({ bal, ...a }) => a), notes: [], monero: 'off', monero_error: '' }),
+    accounts: async () => ok({ accounts: A.map(({ bal, ...a }) => ({ ...a, coin_control: a.max })), notes: [], monero: 'off', monero_error: '' }),
     balance: async id => { await wait(300 + Math.random() * 900); return ok({ balance: A.find(a => a.id === id).bal }); },
     start_monero: async () => ({ ok: false, error: 'Monero is off.' }),
     validate: async (id, to) => ok({ valid: to.length > 25, error: to.length > 25 ? '' : 'Not a valid address.' }),
@@ -48,6 +50,22 @@
     open_url: async () => ok(),
     settings: async () => ok({ config_path: 'C:\\Users\\you\\AppData\\Roaming\\OpenCustody\\config.json', vault_path: 'C:\\Users\\you\\AppData\\Roaming\\OpenCustody\\vault.json', auto_lock: 10, monero_enabled: false, monero_rpc: '', monero_daemon: '', monero_state: 'off', monero_error: '' }),
     open_config: async () => ok(),
+    privacy_status: async () => ok({ ...priv, prices_enabled: !priv.mode, endpoints: [
+      { network: 'Bitcoin', host: 'mempool.space', own: false }, { network: 'Litecoin', host: 'litecoinspace.org', own: false },
+      { network: 'Ethereum', host: 'my-node.local', own: true }, { network: 'Solana', host: 'api.mainnet-beta.solana.com', own: false },
+      { network: 'Tron', host: 'api.trongrid.io', own: false }, { network: 'TON', host: 'toncenter.com', own: false }] }),
+    set_privacy: async o => {
+      if ('tor_enabled' in o) priv.tor_enabled = o.tor_enabled; if ('tor_proxy' in o) priv.tor_proxy = o.tor_proxy;
+      if ('mode' in o) priv.mode = o.mode; if ('hide_balances' in o) priv.hide_balances = o.hide_balances;
+      return ok({ reloaded: 'tor_enabled' in o });
+    },
+    test_tor: async () => { await wait(900); return priv.tor_proxy.endsWith('9150') ? ok({ is_tor: true, ip: '185.220.101.4' }) : { ok: false, error: `No connection through ${priv.tor_proxy}: Can't reach the Tor/SOCKS proxy. Is Tor running?` }; },
+    coins: async id => { await wait(400); return ok({ symbol: 'BTC', coins: [
+      { id: 'aa:0', txid: 'aa11bb22cc33', vout: 0, amount: '0.03', address: 'bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu', change: false },
+      { id: 'bb:1', txid: 'bb44cc55dd66', vout: 1, amount: '0.01512', address: 'bc1qnjg0jd8228aq7egyzacy8cys3knf9xvrerkf9g', change: true },
+      { id: 'cc:0', txid: 'cc77dd88ee99', vout: 0, amount: '0.003', address: 'bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu', change: false }] }); },
+    monero_setup: async (path, daemon, h, en) => { if (en && !/monero-wallet-rpc/i.test(path)) return { ok: false, error: 'Choose the monero-wallet-rpc program from the official Monero CLI download.' }; priv.monero_enabled = en; return ok(); },
+    pick_file: async () => ok({ path: 'C:\\monero\\monero-wallet-rpc.exe' }),
     portfolios: async () => ok({ active: pf.active, items: pf.items }),
     switch_portfolio: async n => { pf.active = n; return ok(); },
     create_portfolio: async name => { const n = pf.items.length; pf.items.push({ n, name }); pf.active = n; return ok({ n }); },

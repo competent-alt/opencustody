@@ -86,10 +86,30 @@ repository.
 
 ## Privacy
 
-By default the app talks to public endpoints (mempool.space, litecoinspace.org, publicnode.com,
-api.mainnet-beta.solana.com, trongrid.io, toncenter.com). Those services can see your IP address
-and which addresses belong to you. For privacy, point `config.json` at your own nodes (Esplora/electrs,
-an Ethereum node, and so on) and/or use Tor/VPN. All endpoints must be HTTPS (or localhost).
+Self-custody keeps your keys private, but the services a wallet talks to can still learn your IP
+address and which addresses are yours. The **Privacy** page (it shows a score) helps reduce that:
+
+* **Tor routing.** Every request (balances, history, prices, broadcasts, and the Monero wallet's
+  node connection) goes through Tor or any SOCKS5 proxy. Hostnames are resolved inside Tor, so DNS
+  doesn't leak. It is **fail-closed**: if Tor is down, nothing is sent. Run Tor Browser (port 9150)
+  or the tor service (9050), then use "Test connection", which asks check.torproject.org through it.
+* **One Tor circuit per portfolio.** Each portfolio uses its own circuit and exit IP (via Tor's
+  SOCKS-auth isolation), so services can't link your portfolios together by IP. Price lookups use
+  a separate circuit that never carries addresses.
+* **Privacy mode.** No price lookups, no third-party history indexers, and explorer links are copied
+  for Tor Browser instead of opened in your everyday browser.
+* **Hide balances.** Blurs amounts on screen; the eye button in the top bar toggles it.
+* **Monero first.** A guided Monero setup, with Monero pinned at the top of the sidebar. Monero
+  hides sender, receiver and amount on-chain; every other network here is fully public.
+* **Coin control (BTC/LTC).** Choose exactly which coins a transaction spends. The wallet warns
+  whenever a send would link several of your addresses together.
+* **Your own nodes.** The Privacy page lists which networks still use public endpoints. Point
+  `config.json` at your own nodes (`.onion` addresses work while Tor is on). Remote endpoints must
+  be HTTPS, except `.onion` over Tor and localhost.
+
+What this does **not** do: OpenCustody has no coin "mixer" or "tumbler". Bouncing coins through
+wallets you generate yourself doesn't hide their origin, because the hops are easily linked on-chain,
+and automated layering is legally fraught. For on-chain privacy, use Monero.
 
 ## Recovery phrase compatibility
 

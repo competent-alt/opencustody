@@ -27,6 +27,10 @@ No software can promise "zero vulnerabilities", and this project does not. What 
   are validated per network (checksums, mainnet prefixes).
 * Leaving the wallet open: it auto-locks after inactivity (default 10 minutes).
 
+* Network observers and API providers learning your IP, if Tor routing is on. The SOCKS5 client
+  (`socks.py`) resolves hostnames remotely, fails closed, ignores environment HTTP proxies, and gives
+  each portfolio its own Tor circuit. The User-Agent is a generic string.
+
 **Not protected against:**
 * Malware on your computer (keyloggers, clipboard hijackers, screen capture). Use a clean
   machine, compare addresses character by character, and consider a hardware wallet for large amounts.
