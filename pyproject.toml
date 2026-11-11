@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=70"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "opencustody"
+version = "0.1.0"
+description = "Open-source self-custodial desktop wallet: BTC, LTC, ETH & EVM, SOL, TRX, TON, XMR"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+# Exact pins: wallet dependencies are upgraded deliberately, after review.
+dependencies = [
+    "bip_utils==2.12.3",
+    "coincurve==21.0.0",
+    "cryptography==50.0.2",
+    "embit==0.8.0",
+    "eth-account==0.14.0",
+    "eth-keys==0.8.0",
+    "eth-utils==6.0.0",
+    "PyNaCl==1.6.2",
+    "solders==0.29.0",
+    "tonsdk==1.0.15",
+]
+
+[project.optional-dependencies]
+dev = ["pytest==9.2.0", "pip-audit", "bandit"]
+
+[project.gui-scripts]
+opencustody = "opencustody.gui:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.bandit]
+exclude_dirs = ["tests", ".venv"]
