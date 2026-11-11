@@ -11,7 +11,7 @@ from embit.script import Script, Witness, p2pkh
 from embit.transaction import SIGHASH, Transaction, TransactionInput, TransactionOutput
 
 from .. import net
-from .base import Asset, Chain, InsufficientFunds, PreparedTx
+from .base import Asset, Chain, HistoryItem, InsufficientFunds, PreparedTx
 
 NETWORKS = {
     "btc": {"name": "Bitcoin", "symbol": "BTC", "hrp": "bc", "p2pkh": 0x00, "p2sh": (0x05,)},
@@ -204,3 +204,30 @@ class UtxoChain(Chain):
 
         return PreparedTx(self.name, asset, self.address(), to, send_amt, fee, f"({rate} sat/vB)",
                           self.native, send)
+
+    def history(self, asset: Asset, limit: int = 25) -> list[HistoryItem]:
+        self._scan()
+        ours = {a for _, _, a in self._used}
+        txs: dict[str, dict] = {}
+        for a in ours:
+            for t in net.get_json(f"{self.api}/address/{a}/txs"):
+                txs[t["txid"]] = t
+        out = []
+        for t in txs.values():
+            recv = sum(o.get("value", 0) for o in t["vout"] if o.get("scriptpubkey_address") in ours)
+            spent = sum((i.get("prevout") or {}).get("value", 0) for i in t["vin"]
+                        if (i.get("prevout") or {}).get("scriptpubkey_address") in ours)
+            net_amt = recv - spent
+            if spent and net_amt <= 0:
+                others = [o for o in t["vout"] if o.get("scriptpubkey_address") not in ours]
+                direction = "out" if others else "self"
+                party = others[0].get("scriptpubkey_address", "") if others else ""
+            else:
+                direction = "in"
+                srcs = [(i.get("prevout") or {}).get("scriptpubkey_address", "") for i in t["vin"]]
+                party = next((s for s in srcs if s and s not in ours), "")
+            st = t.get("status") or {}
+            out.append(HistoryItem(t["txid"], st.get("block_time"), direction, abs(net_amt), party,
+                                   "confirmed" if st.get("confirmed") else "pending"))
+        out.sort(key=lambda h: h.time or 2**62, reverse=True)
+        return out[:limit]

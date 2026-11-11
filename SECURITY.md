@@ -47,6 +47,8 @@ The window is an HTML page rendered by the operating system's web view (via `pyw
 * Signed transactions stay in Python behind a single-use random token. A review can be sent only
   once, and locking the wallet discards it.
 * Private mode: the web view persists no cookies, cache or storage. Dev tools are disabled.
+* Switching portfolio rebuilds every chain from fresh keys and discards any pending review.
+  Portfolios share one seed, so the recovery phrase protects all of them, and losing it loses all of them.
 
 ## Cryptography and dependencies
 

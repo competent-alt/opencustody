@@ -18,6 +18,10 @@
     ['trx:1', 'Tron', 'USDT', 'TRX', 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t', 'TUEZSdKsoDHQMeZwihtdoBiN46zxhGWYdH', false, '8248.535785'],
     ['ton:0', 'TON', 'TON', 'TON', null, 'UQAzWZa6nM5mJev91wGc7VCSfBoIsYRqKJpV78N8Add9-RKY', false, '0'],
   ].map(([id, network, symbol, native, token, address, max, bal]) => ({ id, network, symbol, native, token, address, max, bal }));
+  const pf = { active: 0, items: [{ n: 0, name: 'Main' }, { n: 1, name: 'Savings' }] };
+  const PRICES = { BTC: { usd: 74239, change24h: 1.8 }, LTC: { usd: 51.28, change24h: -0.6 }, ETH: { usd: 2078, change24h: 2.4 },
+    SOL: { usd: 84.85, change24h: -1.2 }, TRX: { usd: 0.3163, change24h: 0.3 }, TON: { usd: 1.21, change24h: -2.1 },
+    USDC: { usd: 1, change24h: 0 }, USDT: { usd: 1, change24h: 0 }, XMR: { usd: 589.53, change24h: 0.9 } };
   window.MockApi = {
     state: async () => ok({ version: 'mock', vault_exists: vault, unlocked }),
     ping: async () => ok(),
@@ -44,5 +48,25 @@
     open_url: async () => ok(),
     settings: async () => ok({ config_path: 'C:\\Users\\you\\AppData\\Roaming\\OpenCustody\\config.json', vault_path: 'C:\\Users\\you\\AppData\\Roaming\\OpenCustody\\vault.json', auto_lock: 10, monero_enabled: false, monero_rpc: '', monero_daemon: '', monero_state: 'off', monero_error: '' }),
     open_config: async () => ok(),
+    portfolios: async () => ok({ active: pf.active, items: pf.items }),
+    switch_portfolio: async n => { pf.active = n; return ok(); },
+    create_portfolio: async name => { const n = pf.items.length; pf.items.push({ n, name }); pf.active = n; return ok({ n }); },
+    rename_portfolio: async (n, name) => { pf.items.find(i => i.n === n).name = name; return ok(); },
+    remove_portfolio: async n => { pf.items = pf.items.filter(i => i.n !== n); pf.active = 0; return ok(); },
+    prices: async () => { await wait(300); return ok({ enabled: true, prices: PRICES }); },
+    history: async id => {
+      await wait(200 + Math.random() * 800);
+      const a = A.find(x => x.id === id);
+      if (id === 'base:0') return ok({ items: [], unavailable: 'History for Base needs a free Etherscan API key.' });
+      const now = Date.now() / 1000, items = [];
+      for (let i = 0; i < 4; i++) {
+        const dir = (i + id.length) % 3 === 0 ? 'out' : 'in';
+        items.push({ id, txid: id + i, time: i === 0 && id === 'sol:0' ? null : Math.floor(now - (i * 3 + id.length) * 36000), dir,
+          amount: (parseFloat(a.bal || '1') / (i + 3)).toFixed(4).replace(/\.?0+$/, ''), symbol: a.symbol, network: a.network,
+          counterparty: dir === 'in' ? 'bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh' : '0x5350cf0d1279c9e5b45a3d3a3e8c1b2f7a6d9e0c',
+          status: i === 0 && id === 'sol:0' ? 'pending' : 'confirmed', url: 'https://example.com' });
+      }
+      return ok({ items });
+    },
   };
 })();

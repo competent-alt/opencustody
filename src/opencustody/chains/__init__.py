@@ -18,7 +18,8 @@ def build_chains(cfg: dict, keyring) ->tuple[list[Chain], list[str]]:
     makers = [
         ("Bitcoin", lambda: UtxoChain("btc", cfg["bitcoin"], keyring)),
         ("Litecoin", lambda: UtxoChain("ltc", cfg["litecoin"], keyring)),
-        *[(e["name"], (lambda e=e: EvmChain(e, keyring))) for e in cfg["evm"]],
+        *[(e["name"], (lambda e=e: EvmChain(dict(e, etherscan_api_key=cfg.get("etherscan_api_key", "")), keyring)))
+          for e in cfg["evm"]],
         ("Solana", lambda: SolanaChain(cfg["solana"], keyring)),
         ("Tron", lambda: TronChain(cfg["tron"], keyring)),
         ("TON", lambda: TonChain(cfg["ton"], keyring)),

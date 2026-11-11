@@ -14,6 +14,17 @@ An open-source, self-custodial desktop wallet for **Bitcoin, Litecoin, Ethereum 
 > ⚠️ **Status: alpha, unaudited.** Read [SECURITY.md](SECURITY.md) before you store real value.
 > Try it with small amounts first.
 
+## Features
+
+* **Home screen:** total portfolio value with a pie wheel of your holdings. Hover a slice to see its
+  value and share, click it to open that asset.
+* **Portfolios:** many separate wallets from the same recovery phrase (e.g. "Main", "Savings",
+  "Business"). Each has its own addresses on every network, with no on-chain link between them,
+  and your one backup restores them all.
+* **History:** recent sent and received transactions across all assets, filterable, with links
+  to block explorers.
+* Send, receive and per-network address checks, auto-lock, and an encrypted vault.
+
 ## Supported assets
 
 | Network | Native coin | Tokens | Send-all |
@@ -82,15 +93,30 @@ an Ethereum node, and so on) and/or use Tor/VPN. All endpoints must be HTTPS (or
 
 ## Recovery phrase compatibility
 
-| Network | Path | Compatible with |
+Portfolio *n* (0 = Main) uses these paths, matching what other wallets call "account *n*+1":
+
+| Network | Path for portfolio n | Compatible with |
 |---|---|---|
-| Bitcoin | m/84'/0'/0' | Sparrow, Electrum (BIP-84), Ledger, Trezor |
-| Litecoin | m/84'/2'/0' | Ledger, Trezor |
-| EVM | m/44'/60'/0'/0/0 | MetaMask, Rabby, Ledger |
-| Solana | m/44'/501'/0'/0' | Phantom, Solflare |
-| Tron | m/44'/195'/0'/0/0 | TronLink, Ledger |
-| TON | m/44'/607'/0' (v4r2) | Ledger TON app. **Not** Tonkeeper's TON-native 24 words |
-| Monero | m/44'/128'/0' (SLIP-10) | Ledger-style derivation. **Not** a native 25-word Monero seed |
+| Bitcoin | m/84'/0'/n' | Sparrow, Electrum (BIP-84), Ledger, Trezor |
+| Litecoin | m/84'/2'/n' | Ledger, Trezor |
+| EVM | m/44'/60'/0'/0/n | MetaMask (account n+1), Rabby |
+| Solana | m/44'/501'/n'/0' | Phantom, Solflare |
+| Tron | m/44'/195'/n'/0/0 | Ledger; TronLink for n = 0 |
+| TON | m/44'/607'/n' (v4r2) | Ledger TON app. **Not** Tonkeeper's TON-native 24 words |
+| Monero | m/44'/128'/n' (SLIP-10) | Ledger-style derivation. **Not** a native 25-word Monero seed |
+
+Portfolio names are stored unencrypted in `portfolios.json`; they are labels only. If you restore
+on a new computer, add portfolios again: numbers are reused in order, so the same addresses come back.
+
+## Prices and history
+
+* **Prices** come from CoinGecko's public API, which sees which coins are listed but never your
+  addresses. Turn them off with `"prices": {"enabled": false}`.
+* **History** uses each network's public indexer: Esplora (BTC, LTC), Blockscout (Ethereum,
+  Optimism), Solana RPC, TronGrid, toncenter, and your local `monero-wallet-rpc`. These services
+  see the addresses you query, like the balance APIs do. Base, Arbitrum, Polygon and BNB Chain need
+  a free [Etherscan API key](https://etherscan.io/apis): set `"etherscan_api_key"` in `config.json`
+  and it covers every EVM chain.
 
 ## Development
 

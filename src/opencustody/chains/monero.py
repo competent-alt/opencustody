@@ -22,7 +22,7 @@ from pathlib import Path
 
 from .. import net
 from ..paths import monero_dir
-from .base import Asset, Chain, InsufficientFunds, PreparedTx
+from .base import Asset, Chain, HistoryItem, InsufficientFunds, PreparedTx
 
 WALLET_NAME = "opencustody"
 DAEMON_RE = re.compile(r"^(https?://)?[A-Za-z0-9.\-]+(:\d{1,5})?/?$")
@@ -57,6 +57,8 @@ class MoneroChain(Chain):
         if not DAEMON_RE.match(daemon):
             raise RuntimeError("Set monero.daemon to a node address like node.example.org:18089.")
         self._keys = keyring.monero_keys()
+        n = getattr(keyring, "n", 0)
+        wallet_name = WALLET_NAME if not n else f"{WALLET_NAME}-{n}"  # one wallet file per portfolio
         wallet_pw = keyring.derived_secret("monero-wallet-file")
         rpc_pw = secrets.token_hex(24)
         port = _free_port()
@@ -73,11 +75,11 @@ class MoneroChain(Chain):
         opener = urllib.request.build_opener(urllib.request.HTTPDigestAuthHandler(pm))
         self.rpc = net.JsonRpc(url, opener=opener)
         self._wait_ready()
-        if (wdir / WALLET_NAME).exists():
-            self.rpc.call("open_wallet", {"filename": WALLET_NAME, "password": wallet_pw})
+        if (wdir / wallet_name).exists():
+            self.rpc.call("open_wallet", {"filename": wallet_name, "password": wallet_pw})
         else:
             self.rpc.call("generate_from_keys", {
-                "filename": WALLET_NAME, "address": self._keys.address, "spendkey": self._keys.private_spend,
+                "filename": wallet_name, "address": self._keys.address, "spendkey": self._keys.private_spend,
                 "viewkey": self._keys.private_view, "password": wallet_pw, "restore_height": int(restore_height),
                 "autosave_current": True})
         got = self.rpc.call("get_address", {"account_index": 0})["address"]
@@ -138,6 +140,20 @@ class MoneroChain(Chain):
             return self.rpc.call("relay_tx", {"hex": meta})["tx_hash"]
 
         return PreparedTx(self.name, asset, self.address(), to, int(amt), int(fee), "", self.native, send)
+
+    def history(self, asset: Asset, limit: int = 25) -> list[HistoryItem]:
+        r = self.rpc.call("get_transfers", {"in": True, "out": True, "pending": True, "pool": True,
+                                            "failed": True, "account_index": 0})
+        out = []
+        for kind in ("in", "out", "pending", "pool", "failed"):
+            for t in r.get(kind, []):
+                d = "out" if kind in ("out", "pending", "failed") else "in"
+                party = ((t.get("destinations") or [{}])[0].get("address", "") if d == "out" else "")
+                status = {"pending": "pending", "pool": "pending", "failed": "failed"}.get(kind, "confirmed")
+                amt = int(t.get("amount", 0)) + (int(t.get("fee", 0)) if d == "out" else 0)
+                out.append(HistoryItem(t["txid"], t.get("timestamp"), d, amt, party, status))
+        out.sort(key=lambda h: h.time or 2**62, reverse=True)
+        return out[:limit]
 
     def close(self) -> None:
         try:

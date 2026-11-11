@@ -74,38 +74,77 @@ class Keyring:
         # Python can't guarantee memory is zeroed, but drop our reference.
         self._seed = b""
 
+    def seed(self) -> bytes:
+        if not self._seed:
+            raise RuntimeError("Wallet is locked.")
+        return self._seed
+
+    def portfolio(self, n: int) -> "PortfolioKeys":
+        """Keys for portfolio n: a separate, unlinkable set of addresses from the same phrase."""
+        return PortfolioKeys(self, n)
+
+    def derived_secret(self, label: str) -> str:
+        """Deterministic per-purpose secret (e.g. the Monero wallet-file password)."""
+        return hmac.new(self.seed(), b"opencustody:" + label.encode(), hashlib.sha256).hexdigest()
+
+    # Portfolio 0 shortcuts (the default wallet).
+    def __getattr__(self, name):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(PortfolioKeys(self, 0), name)
+
+
+MAX_PORTFOLIOS = 100
+
+
+class PortfolioKeys:
+    """Derivations for one portfolio. Portfolio n uses the index each wallet app uses for
+    'account n' (see the README table), so portfolio 0 is the classic single wallet."""
+
+    def __init__(self, keyring: Keyring, n: int):
+        if not 0 <= int(n) < MAX_PORTFOLIOS:
+            raise ValueError("Portfolio number out of range.")
+        self._kr = keyring
+        self.n = int(n)
+
+    def derived_secret(self, label: str) -> str:
+        return self._kr.derived_secret(f"{label}:{self.n}" if self.n else label)
+
     # -- secp256k1 account chains -------------------------------------------------
-    def _bip44_addr(self, coin: Bip44Coins, index: int = 0):
-        return (
-            Bip44.FromSeed(self._seed, coin).Purpose().Coin().Account(0)
-            .Change(Bip44Changes.CHAIN_EXT).AddressIndex(index)
-        )
+    def _evm_node(self):
+        # MetaMask-style: account n = address index n.
+        return (Bip44.FromSeed(self._kr.seed(), Bip44Coins.ETHEREUM).Purpose().Coin().Account(0)
+                .Change(Bip44Changes.CHAIN_EXT).AddressIndex(self.n))
 
-    def evm_private_key(self, index: int = 0) -> bytes:
-        return self._bip44_addr(Bip44Coins.ETHEREUM, index).PrivateKey().Raw().ToBytes()
+    def evm_private_key(self) -> bytes:
+        return self._evm_node().PrivateKey().Raw().ToBytes()
 
-    def evm_address(self, index: int = 0) -> str:
-        return self._bip44_addr(Bip44Coins.ETHEREUM, index).PublicKey().ToAddress()
+    def evm_address(self) -> str:
+        return self._evm_node().PublicKey().ToAddress()
+
+    def _tron_node(self):
+        # Ledger-style: account n = m/44'/195'/n'/0/0.
+        return (Bip44.FromSeed(self._kr.seed(), Bip44Coins.TRON).Purpose().Coin().Account(self.n)
+                .Change(Bip44Changes.CHAIN_EXT).AddressIndex(0))
 
     def tron_private_key(self) -> bytes:
-        return self._bip44_addr(Bip44Coins.TRON).PrivateKey().Raw().ToBytes()
+        return self._tron_node().PrivateKey().Raw().ToBytes()
 
     def tron_address(self) -> str:
-        return self._bip44_addr(Bip44Coins.TRON).PublicKey().ToAddress()
+        return self._tron_node().PublicKey().ToAddress()
 
     # -- UTXO chains ----------------------------------------------------------------
+    def _bip84_account(self, coin: str):
+        c = {"btc": Bip84Coins.BITCOIN, "ltc": Bip84Coins.LITECOIN}[coin]
+        return Bip84.FromSeed(self._kr.seed(), c).Purpose().Coin().Account(self.n)
+
     def bip84_account_xprv(self, coin: str) -> str:
         """Account-level extended private key (zprv-style serialization) for BTC or LTC."""
-        c = {"btc": Bip84Coins.BITCOIN, "ltc": Bip84Coins.LITECOIN}[coin]
-        return Bip84.FromSeed(self._seed, c).Purpose().Coin().Account(0).PrivateKey().ToExtended()
+        return self._bip84_account(coin).PrivateKey().ToExtended()
 
     def bip84_key(self, coin: str, change: int, index: int) -> tuple[bytes, bytes, str]:
         """(private key, compressed public key, address) for one BIP-84 address."""
-        c = {"btc": Bip84Coins.BITCOIN, "ltc": Bip84Coins.LITECOIN}[coin]
-        node = (
-            Bip84.FromSeed(self._seed, c).Purpose().Coin().Account(0)
-            .Change(Bip44Changes(change)).AddressIndex(index)
-        )
+        node = self._bip84_account(coin).Change(Bip44Changes(change)).AddressIndex(index)
         return (
             node.PrivateKey().Raw().ToBytes(),
             node.PublicKey().RawCompressed().ToBytes(),
@@ -114,26 +153,26 @@ class Keyring:
 
     # -- ed25519 chains -------------------------------------------------------------
     def solana_key(self) -> Ed25519Key:
-        node = Bip44.FromSeed(self._seed, Bip44Coins.SOLANA).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT)
+        node = (Bip44.FromSeed(self._kr.seed(), Bip44Coins.SOLANA).Purpose().Coin().Account(self.n)
+                .Change(Bip44Changes.CHAIN_EXT))
         return Ed25519Key(node.PrivateKey().Raw().ToBytes(), node.PublicKey().RawCompressed().ToBytes()[1:])
 
+    def _ton_node(self):
+        return Bip44.FromSeed(self._kr.seed(), Bip44Coins.TON).Purpose().Coin().Account(self.n)
+
     def ton_key(self) -> Ed25519Key:
-        node = Bip44.FromSeed(self._seed, Bip44Coins.TON).Purpose().Coin().Account(0)
+        node = self._ton_node()
         return Ed25519Key(node.PrivateKey().Raw().ToBytes(), node.PublicKey().RawCompressed().ToBytes()[1:])
 
     def ton_address_reference(self) -> str:
         """bip-utils' own TON v4 address encoding, used to cross-check tonsdk."""
-        return Bip44.FromSeed(self._seed, Bip44Coins.TON).Purpose().Coin().Account(0).PublicKey().ToAddress()
+        return self._ton_node().PublicKey().ToAddress()
 
     def monero_keys(self) -> MoneroKeys:
-        node = Bip44.FromSeed(self._seed, Bip44Coins.MONERO_ED25519_SLIP).Purpose().Coin().Account(0)
+        node = Bip44.FromSeed(self._kr.seed(), Bip44Coins.MONERO_ED25519_SLIP).Purpose().Coin().Account(self.n)
         m = Monero.FromBip44PrivateKey(node.PrivateKey().Raw().ToBytes())
         return MoneroKeys(
             address=str(m.PrimaryAddress()),
             private_spend=m.PrivateSpendKey().Raw().ToHex(),
             private_view=m.PrivateViewKey().Raw().ToHex(),
         )
-
-    def derived_secret(self, label: str) -> str:
-        """Deterministic per-purpose secret (e.g. the Monero wallet-file password)."""
-        return hmac.new(self._seed, b"opencustody:" + label.encode(), hashlib.sha256).hexdigest()

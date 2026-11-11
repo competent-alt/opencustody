@@ -5,8 +5,15 @@ from __future__ import annotations
 from eth_account import Account
 from eth_utils import is_address, is_checksum_address, to_checksum_address
 
+import urllib.parse
+
+from .. import net
 from ..net import JsonRpc
-from .base import Asset, Chain, InsufficientFunds, PreparedTx
+from .base import Asset, Chain, HistoryItem, HistoryUnavailable, InsufficientFunds, PreparedTx
+
+# Free Etherscan-compatible APIs (Blockscout), used if config.json predates "history_api".
+# (Base/Arbitrum/Polygon Blockscout instances block non-browser clients.)
+DEFAULT_HISTORY_API = {"eth": "https://eth.blockscout.com/api", "op": "https://optimism.blockscout.com/api"}
 
 TRANSFER_SELECTOR = "a9059cbb"  # transfer(address,uint256)
 BALANCEOF_SELECTOR = "70a08231"  # balanceOf(address)
@@ -136,3 +143,45 @@ class EvmChain(Chain):
 
         return PreparedTx(self.name, asset, self._addr, to, amount, fee, "(maximum; usually less)",
                           self.native, send, warnings)
+
+    def history(self, asset: Asset, limit: int = 25) -> list[HistoryItem]:
+        try:
+            return self._history(asset, limit)
+        except net.NetError:
+            raise HistoryUnavailable(f"{self.name} history service didn't respond; try again or use the explorer.") from None
+
+    def _history(self, asset: Asset, limit: int) -> list[HistoryItem]:
+        params = {"module": "account", "address": self._addr, "page": 1, "offset": limit, "sort": "desc"}
+        key = self.cfg.get("etherscan_api_key") or ""
+        if key:
+            api = "https://api.etherscan.io/v2/api"
+            params.update(chainid=self.chain_id, apikey=key)
+        else:
+            api = self.cfg.get("history_api", DEFAULT_HISTORY_API.get(self.key, ""))
+        if not api:
+            raise HistoryUnavailable(f"History for {self.name} needs a free Etherscan API key "
+                                     "(etherscan_api_key in Settings → config).")
+        if asset.contract is None:
+            params["action"] = "txlist"
+        else:
+            params.update(action="tokentx", contractaddress=asset.contract)
+            self._token_decimals(asset)
+        r = net.get_json(f"{api}?{urllib.parse.urlencode(params)}")
+        rows = r.get("result")
+        if not isinstance(rows, list):
+            if str(r.get("message", "")).lower().startswith("no transactions"):
+                return []
+            raise net.NetError(f"History API: {r.get('message') or r.get('result')}")
+        me = self._addr.lower()
+        out = []
+        for t in rows:
+            value = int(t.get("value") or 0)
+            if asset.contract is None and value == 0:
+                continue  # contract calls without ETH (e.g. token transfers) live in the token's history
+            frm, to = (t.get("from") or "").lower(), (t.get("to") or "").lower()
+            direction = "self" if frm == to == me else "out" if frm == me else "in"
+            failed = t.get("isError") == "1" or t.get("txreceipt_status") == "0"
+            out.append(HistoryItem(t["hash"], int(t.get("timeStamp") or 0) or None, direction, value,
+                                   t.get("from") if direction == "in" else t.get("to") or "",
+                                   "failed" if failed else "confirmed"))
+        return out

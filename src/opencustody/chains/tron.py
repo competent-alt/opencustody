@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import hashlib
 import time
+import urllib.parse
 
 from eth_keys import keys as eth_keys
 from embit import base58
 
 from .. import net
-from .base import Asset, Chain, InsufficientFunds, PreparedTx
+from .base import Asset, Chain, HistoryItem, InsufficientFunds, PreparedTx
 
 TRANSFER_CONTRACT = 1
 TRIGGER_SMART_CONTRACT = 31
@@ -194,3 +195,31 @@ class TronChain(Chain):
             return txid
 
         return PreparedTx(self.name, asset, self._addr, to, amount, fee, note, self.native, send, warnings)
+
+    def history(self, asset: Asset, limit: int = 25) -> list[HistoryItem]:
+        base = f"{self.api}/v1/accounts/{self._addr}/transactions"
+        out = []
+        if asset.contract is None:
+            r = net.get_json(f"{base}?{urllib.parse.urlencode({'limit': limit, 'only_confirmed': 'false'})}")
+            for t in r.get("data", []):
+                c = (t.get("raw_data", {}).get("contract") or [{}])[0]
+                if c.get("type") != "TransferContract":
+                    continue
+                v = c["parameter"]["value"]
+                frm = bytes_to_address(bytes.fromhex(v["owner_address"]))
+                to = bytes_to_address(bytes.fromhex(v["to_address"]))
+                d = "self" if frm == to == self._addr else "out" if frm == self._addr else "in"
+                ok = (t.get("ret") or [{}])[0].get("contractRet", "SUCCESS") == "SUCCESS"
+                out.append(HistoryItem(t["txID"], int(t.get("block_timestamp", 0)) // 1000 or None, d,
+                                       int(v.get("amount", 0)), frm if d == "in" else to,
+                                       "confirmed" if ok else "failed"))
+        else:
+            self._decimals(asset)
+            q = urllib.parse.urlencode({"limit": limit, "contract_address": asset.contract, "only_confirmed": "false"})
+            r = net.get_json(f"{base}/trc20?{q}")
+            for t in r.get("data", []):
+                frm, to = t.get("from", ""), t.get("to", "")
+                d = "self" if frm == to == self._addr else "out" if frm == self._addr else "in"
+                out.append(HistoryItem(t["transaction_id"], int(t.get("block_timestamp", 0)) // 1000 or None, d,
+                                       int(t.get("value", 0)), frm if d == "in" else to))
+        return out

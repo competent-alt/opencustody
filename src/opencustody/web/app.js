@@ -172,15 +172,24 @@ function showPassword() {
 }
 
 /* ---------------- Wallet ---------------- */
-const S = { accounts: [], bal: {}, cur: null, notes: [], monero: 'off', moneroErr: '', gen: 0 };
+const S = {
+  accounts: [], bal: {}, cur: null, notes: [], monero: 'off', moneroErr: '', gen: 0,
+  page: 'home', pf: { active: 0, items: [] }, prices: null, pricesOff: false, priceErr: '',
+  hist: {}, histFilter: 'all', histAsset: null, hover: null,
+};
 
 async function enterApp() {
   $('#onboard').hidden = true;
   $('#app').hidden = false;
+  await loadPortfolio();
+}
+
+async function loadPortfolio() {
   S.gen++;
-  await loadAccounts();
-  if (!S.cur && S.accounts.length) S.cur = S.accounts[0].id;
-  renderSidebar(); renderView();
+  S.bal = {}; S.hist = {}; S.cur = null; S.histAsset = null; S.hover = null;
+  await Promise.all([loadAccounts(), loadPortfolios()]);
+  if (S.accounts.length) S.cur = S.accounts[0].id;
+  renderSidebar(); go('home');
   refreshAll();
   if (S.monero === 'idle') startMonero();
 }
@@ -189,32 +198,78 @@ async function loadAccounts() {
   const r = await call('accounts');
   S.accounts = r.accounts; S.notes = r.notes; S.monero = r.monero; S.moneroErr = r.monero_error;
 }
+async function loadPortfolios() {
+  S.pf = await call('portfolios');
+  const p = S.pf.items.find(i => i.n === S.pf.active);
+  $('#pfName').textContent = p ? p.name : 'Main';
+}
+async function loadPrices() {
+  try {
+    const r = await call('prices');
+    S.pricesOff = !r.enabled; S.prices = r.prices; S.priceErr = '';
+  } catch (e) { S.priceErr = e.message; }
+  if (S.page === 'home') scheduleHome();
+}
 
 async function startMonero() {
   S.monero = 'starting'; renderSidebar();
   try { await call('start_monero'); } catch (e) { S.moneroErr = e.message; }
-  await loadAccounts(); renderSidebar(); renderView();
+  await loadAccounts(); renderSidebar(); renderPage();
   for (const a of S.accounts) if (a.network === 'Monero') refreshOne(a.id);
 }
 
 const cur = () => S.accounts.find(a => a.id === S.cur);
+const byId = id => S.accounts.find(a => a.id === id);
 const loading = id => S.bal[id] === undefined || S.bal[id] === '…';
 function balNode(id, small) {
   return loading(id) ? thinking(small) : small ? h('span', { class: 'bal', text: S.bal[id] }) : document.createTextNode(S.bal[id]);
 }
-function select(id) {
-  S.cur = id;
-  for (const b of document.querySelectorAll('#accts .acct')) b.classList.toggle('active', b.dataset.id === id);
-  renderView();
+const symBadge = s => s.length > 4 ? s.slice(0, 4) : s;
+const usdFmt = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
+const usd = v => usdFmt.format(v);
+const price = sym => (S.prices && S.prices[sym]) ? S.prices[sym].usd : null;
+function usdValue(a) {
+  const p = price(a.symbol), b = parseFloat(S.bal[a.id]);
+  return p == null || !isFinite(b) ? null : b * p;
 }
+const short = s => !s ? '' : s.length > 16 ? `${s.slice(0, 6)}…${s.slice(-4)}` : s;
+function ago(t) {
+  if (!t) return 'pending';
+  const s = Date.now() / 1000 - t;
+  if (s < 60) return 'just now';
+  if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
+  if (s < 86400 * 7) return `${Math.floor(s / 86400)} d ago`;
+  return new Date(t * 1000).toLocaleDateString();
+}
+
+/* ---- navigation ---- */
+function go(page, opts) {
+  S.page = page;
+  if (page === 'history') S.histAsset = opts && opts.asset || null;
+  $('#navHome').classList.toggle('on', page === 'home');
+  $('#navHistory').classList.toggle('on', page === 'history');
+  $('#topHistory').classList.toggle('on', page === 'history');
+  for (const b of document.querySelectorAll('#accts .acct')) b.classList.toggle('active', page === 'asset' && b.dataset.id === S.cur);
+  renderPage();
+  $('.scroller').scrollTop = 0;
+}
+function select(id) { S.cur = id; go('asset'); }
+function renderPage() {
+  if (S.page === 'home') renderHome();
+  else if (S.page === 'history') renderHistory();
+  else renderAsset();
+}
+
 // Update one balance in place, so clicks aren't lost to re-rendering while balances load.
 function showBal(id) {
   for (const b of document.querySelectorAll('#accts .acct')) if (b.dataset.id === id) b.lastChild.replaceWith(balNode(id, true));
   const v = $('#balVal');
-  if (id === S.cur && v) v.replaceChildren(balNode(id, false));
+  if (S.page === 'asset' && id === S.cur && v) v.replaceChildren(balNode(id, false));
+  if (S.page === 'home') scheduleHome();
 }
-const symBadge = s => s.length > 4 ? s.slice(0, 4) : s;
 
+/* ---- sidebar ---- */
 function renderSidebar() {
   const q = $('#acctSearch').value.trim().toLowerCase();
   const nav = $('#accts'); nav.replaceChildren();
@@ -227,7 +282,7 @@ function renderSidebar() {
   for (const [net, list] of groups) {
     nav.append(h('div', { class: 'group-label', text: net }));
     for (const a of list) {
-      nav.append(h('button', { class: 'acct' + (a.id === S.cur ? ' active' : ''), 'data-id': a.id, onclick: () => select(a.id) },
+      nav.append(h('button', { class: 'acct' + (S.page === 'asset' && a.id === S.cur ? ' active' : ''), 'data-id': a.id, onclick: () => select(a.id) },
         h('span', { class: 'sym', text: symBadge(a.symbol) }),
         h('span', { class: 'nm' }, a.symbol, a.token ? h('small', { text: 'token' }) : null),
         balNode(a.id, true)));
@@ -243,21 +298,210 @@ function renderSidebar() {
   if (!nav.children.length) nav.append(h('div', { class: 'empty-history', text: 'No matching assets' }));
 }
 
-function renderView() {
+/* ---- portfolio switcher ---- */
+function togglePf(open) {
+  const dd = $('#pfDD'), btn = $('#pfBtn');
+  open = open === undefined ? !dd.classList.contains('open') : open;
+  if (open) {
+    const r = btn.getBoundingClientRect();
+    dd.style.left = r.left + 'px'; dd.style.top = (r.bottom + 6) + 'px'; dd.style.width = Math.max(r.width, 280) + 'px';
+    dd.replaceChildren(
+      h('div', { class: 'menu-label', text: 'Portfolios' }),
+      ...S.pf.items.map(p => h('div', { class: 'pf-opt' + (p.n === S.pf.active ? ' sel' : ''), role: 'button', onclick: () => switchPf(p.n) },
+        icon('i-check', 'i check'),
+        h('div', { class: 'meta' }, h('div', { class: 'nm', text: p.name }), h('div', { class: 'sub', text: `#${p.n} · account ${p.n}` })),
+        h('div', { class: 'acts' },
+          h('button', { class: 'icon-btn', title: 'Rename', onclick: e => { e.stopPropagation(); togglePf(false); openPfModal(p); } }, icon('i-edit')),
+          p.n ? h('button', { class: 'icon-btn', title: 'Remove from list', onclick: e => { e.stopPropagation(); togglePf(false); openRemovePf(p); } }, icon('i-trash')) : null))),
+      h('button', { class: 'btn-add', onclick: () => { togglePf(false); openPfModal(null); } }, icon('i-plus'), 'New portfolio'));
+  }
+  dd.classList.toggle('open', open); btn.classList.toggle('open', open);
+}
+async function switchPf(n) {
+  togglePf(false);
+  if (n === S.pf.active) return;
+  try { await call('switch_portfolio', n); await loadPortfolio(); toast(`Switched to ${S.pf.items.find(i => i.n === n).name}`); }
+  catch (e) { toast(e.message); }
+}
+function openPfModal(p) {
+  const input = h('input', { value: p ? p.name : '', placeholder: 'e.g. Savings, Trading, Business', maxlength: '40' });
+  const err = h('div', { class: 'form-err' });
+  const save = h('button', { class: 'btn primary' }, p ? 'Save' : 'Create portfolio', icon('i-check'));
+  const submit = async () => {
+    save.disabled = true;
+    try {
+      if (p) { await call('rename_portfolio', p.n, input.value); closeModal(); await loadPortfolios(); }
+      else { await call('create_portfolio', input.value); closeModal(); await loadPortfolio(); toast('Portfolio created'); }
+    } catch (e) { err.textContent = e.message; save.disabled = false; }
+  };
+  save.onclick = submit;
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
+  const next = S.pf.items.reduce((m, i) => i.n === m ? m + 1 : m, 0);
+  openModal(mHead(p ? 'i-edit' : 'i-plus', p ? 'Rename portfolio' : 'New portfolio'),
+    h('div', { class: 'm-body' },
+      h('div', { class: 'field' }, h('label', {}, 'Name'), input),
+      p ? null : h('p', { class: 'note' },
+        `This creates a separate set of addresses on every network from your same recovery phrase (portfolio #${next}). `,
+        'Nothing links it on-chain to your other portfolios, and your existing backup already covers it. ',
+        `In other wallets it is account ${next + 1}: MetaMask's account ${next + 1}, Phantom's wallet ${next + 1}, Ledger's account ${next + 1}.`),
+      err),
+    h('div', { class: 'm-foot' }, h('button', { class: 'btn', onclick: closeModal }, 'Cancel'), save));
+  input.focus();
+}
+function openRemovePf(p) {
+  const btn = h('button', { class: 'btn primary' }, 'Remove from list');
+  btn.onclick = async () => {
+    try { await call('remove_portfolio', p.n); closeModal(); await loadPortfolio(); } catch (e) { toast(e.message); }
+  };
+  openModal(mHead('i-trash', `Remove "${p.name}"?`),
+    h('div', { class: 'm-body' }, h('p', { class: 'note' },
+      'This only hides it here. Its funds stay on-chain and remain controlled by your recovery phrase; ',
+      'adding portfolios again brings the same addresses back.')),
+    h('div', { class: 'm-foot' }, h('button', { class: 'btn', onclick: closeModal }, 'Cancel'), btn));
+}
+
+/* ---- home: pie wheel ---- */
+// Monochrome steps (brand is black & white). Identity never relies on shade alone:
+// every slice has a labelled legend row, and hover links slice and row.
+const SHADES = ['#ffffff', '#cfcfcf', '#a6a6a6', '#828282', '#636363', '#4a4a4a', '#363636'];
+const OTHER_SHADE = '#2a2a2a';
+let homeTimer;
+function scheduleHome() { clearTimeout(homeTimer); homeTimer = setTimeout(() => { if (S.page === 'home') renderHome(); }, 150); }
+
+function slices() {
+  const rows = S.accounts.map(a => ({ a, v: usdValue(a) })).filter(r => r.v && r.v > 0).sort((x, y) => y.v - x.v);
+  const total = rows.reduce((s, r) => s + r.v, 0);
+  // Up to 7 slices; beyond that the smallest fold into one "Other" slice (never a generated 8th shade).
+  const cut = rows.length > SHADES.length ? SHADES.length - 1 : rows.length;
+  const top = rows.slice(0, cut), rest = rows.slice(cut);
+  const out = top.map((r, i) => ({ key: r.a.id, a: r.a, v: r.v, color: SHADES[i], label: r.a.symbol, sub: r.a.network }));
+  if (rest.length) out.push({ key: 'other', v: rest.reduce((s, r) => s + r.v, 0), color: OTHER_SHADE, label: 'Other', sub: `${rest.length} assets`, rest });
+  return { total, out };
+}
+
+function wheelSvg(sl, total) {
+  const R = 118, W = 30, C = 2 * Math.PI * R, GAP = sl.length > 1 ? 3 : 0;
+  const svg = document.createElementNS(SVGNS, 'svg');
+  svg.setAttribute('viewBox', '0 0 300 300');
+  const mk = (tag, attrs) => { const e = document.createElementNS(SVGNS, tag); for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v); return e; };
+  svg.append(mk('circle', { class: 'track', cx: 150, cy: 150, r: R, 'stroke-width': W }));
+  const g = mk('g', { transform: 'rotate(-90 150 150)' });
+  let acc = 0;
+  for (const s of sl) {
+    const len = total ? (s.v / total) * C : 0;
+    const dash = Math.max(len - GAP, 0.5);
+    const c = mk('circle', { class: 'slice', cx: 150, cy: 150, r: R, stroke: s.color, 'stroke-width': W,
+      'stroke-dasharray': `${dash} ${C - dash}`, 'stroke-dashoffset': -acc, 'data-key': s.key });
+    c.addEventListener('mouseenter', () => hoverSlice(s.key));
+    c.addEventListener('mouseleave', () => hoverSlice(null));
+    c.addEventListener('click', () => { if (s.a) select(s.a.id); });
+    g.append(c);
+    acc += len;
+  }
+  svg.append(g);
+  return svg;
+}
+
+function hoverSlice(key) {
+  S.hover = key;
+  const wheel = $('.wheel');
+  if (!wheel) return;
+  wheel.classList.toggle('dim', !!key);
+  for (const c of wheel.querySelectorAll('.slice')) {
+    const on = c.dataset.key === key;
+    c.classList.toggle('hl', on);
+    c.setAttribute('stroke-width', on ? 38 : 30);
+  }
+  for (const r of document.querySelectorAll('.leg')) r.classList.toggle('hl', r.dataset.key === key);
+  renderCenter();
+}
+
+function renderCenter() {
+  const el = $('.wheel-center');
+  if (!el) return;
+  const { total, out } = slices();
+  const s = out.find(x => x.key === S.hover);
+  if (s) {
+    el.replaceChildren(h('div', {}, h('div', { class: 'k', text: `${s.label} · ${s.sub}` }), h('div', { class: 'v', text: usd(s.v) }),
+      h('div', { class: 's', text: `${(s.v / total * 100).toFixed(1)}%` + (s.a ? ` · ${S.bal[s.a.id]} ${s.a.symbol}` : '') })));
+  } else {
+    el.replaceChildren(h('div', {}, h('div', { class: 'k', text: 'Total value' }), h('div', { class: 'v', text: usd(total) }),
+      h('div', { class: 's', text: change24h(out, total) })));
+  }
+}
+function change24h(out, total) {
+  let prev = 0;
+  for (const a of S.accounts) {
+    const v = usdValue(a), p = S.prices && S.prices[a.symbol];
+    if (!v || !p || p.change24h == null) { if (v) prev += v; continue; }
+    prev += v / (1 + p.change24h / 100);
+  }
+  if (!total || !prev) return '24h —';
+  const pct = (total / prev - 1) * 100;
+  return `24h ${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`;
+}
+
+function renderHome() {
+  if (S.page !== 'home') return;
+  const p = S.pf.items.find(i => i.n === S.pf.active);
+  $('#netTitle').textContent = p ? p.name : 'Home';
+  const v = $('#view');
+  const stillLoading = S.accounts.some(a => loading(a.id));
+  const { total, out } = slices();
+  let chart;
+  if (S.pricesOff) {
+    chart = h('div', { class: 'empty', text: 'Prices are turned off in Settings, so values and the chart are hidden. Balances are in the sidebar.' });
+  } else if (!S.prices) {
+    chart = h('div', { class: 'empty' }, S.priceErr ? `Couldn't load prices: ${S.priceErr}` : thinking());
+  } else if (!out.length) {
+    chart = h('div', { class: 'home-grid' },
+      h('div', { class: 'wheel' }, wheelSvg([], 0), h('div', { class: 'wheel-center' },
+        h('div', {}, h('div', { class: 'k', text: 'Total value' }), h('div', { class: 'v', text: usd(0) }),
+          h('div', { class: 's' }, stillLoading ? thinking(true) : 'No funds yet')))),
+      h('div', { class: 'empty' }, stillLoading ? 'Loading balances…' : 'This portfolio is empty. Pick an asset in the sidebar to see its receive address.'));
+  } else {
+    chart = h('div', { class: 'home-grid' },
+      h('div', { class: 'wheel' }, wheelSvg(out, total), h('div', { class: 'wheel-center' })),
+      h('div', { class: 'legend' }, out.map(s => h('button', {
+        class: 'leg', 'data-key': s.key, title: s.a ? `Open ${s.label} on ${s.sub}` : s.rest.map(r => r.a.symbol + ' · ' + r.a.network).join(', '),
+        onmouseenter: () => hoverSlice(s.key), onmouseleave: () => hoverSlice(null), onclick: () => { if (s.a) select(s.a.id); },
+      },
+        h('span', { class: 'sw' }), h('span', { class: 'nm' }, s.label, h('small', { text: s.a ? `${s.sub} · ${S.bal[s.a.id]} ${s.a.symbol}` : s.sub })),
+        h('span', { class: 'usd' }, usd(s.v)), h('span', { class: 'pct', text: `${(s.v / total * 100).toFixed(1)}%` })))));
+    // Swatch colours are set through the CSSOM (allowed by the CSP), not inline style attributes.
+    chart.querySelectorAll('.leg').forEach((r, i) => { r.querySelector('.sw').style.background = out[i].color; });
+  }
+  v.replaceChildren(
+    h('div', { class: 'home-top' }, h('div', { class: 'label', text: 'Portfolio' }),
+      h('div', { class: 'balance' }, S.prices && !S.pricesOff ? usd(total) : (p ? p.name : ''),
+        stillLoading && S.prices ? h('span', {}, thinking(true)) : null)),
+    chart,
+    h('div', { class: 'section-head' }, h('h3', { text: 'Recent activity' }),
+      h('button', { class: 'link-btn', onclick: () => go('history') }, 'View all history', icon('i-right'))),
+    recentList(5),
+    S.prices && !S.pricesOff ? h('div', { class: 'foot-note', text: 'Prices: CoinGecko (sees only which coins are listed, never your addresses)' }) : null);
+  if (S.prices && out.length) { renderCenter(); if (S.hover) hoverSlice(S.hover); }
+  ensureHistory(S.accounts.filter(a => parseFloat(S.bal[a.id]) > 0).map(a => a.id));
+}
+
+/* ---- asset ---- */
+function renderAsset() {
   const a = cur(), v = $('#view');
-  if (!a) { v.replaceChildren(h('div', { class: 'empty-history', text: 'No accounts.' })); return; }
+  if (!a) { go('home'); return; }
   $('#netTitle').textContent = a.network;
   const addr = a.address;
   const pre = h('pre', { class: 'sel' }, h('b', { text: addr.slice(0, 6) }), addr.slice(6, -6), h('b', { text: addr.slice(-6) }));
+  const val = usdValue(a);
   v.replaceChildren(
     h('div', { class: 'acct-hero' },
       h('div', { class: 'big-sym', text: symBadge(a.symbol) }),
       h('div', { class: 'label', text: a.network + (a.token ? ' · token' : '') }),
       h('div', { class: 'balance' }, h('span', { id: 'balVal', class: 'val' }, balNode(a.id, false)), h('span', { text: a.symbol })),
-      h('div', { class: 'sub', text: a.token ? `Token on ${a.network}` : `Native coin of ${a.network}` })),
+      h('div', { class: 'sub', text: (val != null ? usd(val) + ' · ' : '') + (a.token ? `Token on ${a.network}` : `Native coin of ${a.network}`) })),
     h('div', { class: 'actions' },
       h('button', { class: 'btn primary lg', onclick: () => openSend(a) }, icon('i-up'), 'Send'),
       h('button', { class: 'btn lg', onclick: () => copyText(addr) }, icon('i-copy'), 'Copy address'),
+      h('button', { class: 'btn lg', onclick: () => go('history', { asset: a.id }) }, icon('i-clock'), 'History'),
       h('button', { class: 'btn lg', onclick: () => API.explorer(a.id) }, icon('i-ext'), 'Explorer'),
       h('button', { class: 'btn lg ghost', title: 'Refresh balance', onclick: () => refreshOne(a.id) }, icon('i-refresh'))),
     h('div', { class: 'code' },
@@ -272,6 +516,103 @@ function renderView() {
     h('div', {}, S.notes.map(n => h('div', { class: 'err', text: n }))));
 }
 
+/* ---- history ---- */
+async function loadHistory(id, force) {
+  const gen = S.gen;
+  if (!force && S.hist[id] && !S.hist[id].error) return;
+  S.hist[id] = { loading: true, items: [] };
+  try {
+    const r = await call('history', id);
+    if (gen !== S.gen) return;
+    S.hist[id] = { items: r.items, unavailable: r.unavailable || '' };
+  } catch (e) {
+    if (gen !== S.gen) return;
+    S.hist[id] = { items: [], error: e.message };
+  }
+  if (S.page === 'history') scheduleHistory();
+  if (S.page === 'home') scheduleHome();
+}
+// Networks in parallel, one request at a time per network.
+const histQueue = new Map();
+function ensureHistory(ids, force) {
+  for (const id of ids) {
+    if (!force && S.hist[id]) continue;
+    const a = byId(id); if (!a) continue;
+    S.hist[id] = { loading: true, items: [] };
+    const prev = histQueue.get(a.network) || Promise.resolve();
+    const next = prev.then(() => loadHistory(id, true));
+    histQueue.set(a.network, next.catch(() => {}));
+  }
+}
+let histTimer;
+function scheduleHistory() { clearTimeout(histTimer); histTimer = setTimeout(() => { if (S.page === 'history') renderHistory(); }, 120); }
+
+function mergedHistory(ids) {
+  const items = [];
+  for (const id of ids) for (const it of (S.hist[id] && S.hist[id].items) || []) items.push(it);
+  items.sort((x, y) => (y.time || 9e12) - (x.time || 9e12));
+  return items;
+}
+function txRow(it) {
+  const a = byId(it.id);
+  const dirIcon = it.dir === 'in' ? 'i-down' : it.dir === 'out' ? 'i-up' : 'i-refresh';
+  const title = it.dir === 'in' ? 'Received' : it.dir === 'out' ? 'Sent' : it.dir === 'self' ? 'Moved between own addresses' : 'Transaction';
+  const sign = it.dir === 'in' ? '+' : it.dir === 'out' ? '−' : '';
+  const p = price(it.symbol), n = parseFloat(it.amount);
+  return h('button', { class: 'tx ' + it.dir, title: 'Open in block explorer', onclick: () => API.open_url(it.url) },
+    h('span', { class: 'ic' }, icon(dirIcon)),
+    h('span', { class: 'meta' },
+      h('span', { class: 't' }, `${title} ${it.symbol}`,
+        it.status !== 'confirmed' ? h('span', { class: 'pill', text: it.status }) : null),
+      h('span', { class: 'd', text: [it.network, ago(it.time), it.counterparty ? (it.dir === 'in' ? 'from ' : 'to ') + short(it.counterparty) : '', a && a.token ? 'token' : ''].filter(Boolean).join(' · ') })),
+    h('span', { class: 'amt' }, it.dir === 'unknown' ? '—' : `${sign}${it.amount} ${it.symbol}`,
+      p != null && isFinite(n) && n > 0 ? h('small', { text: usd(n * p) }) : null));
+}
+function recentList(n) {
+  const ids = S.accounts.filter(a => parseFloat(S.bal[a.id]) > 0).map(a => a.id);
+  const items = mergedHistory(ids).slice(0, n);
+  const busy = ids.some(id => S.hist[id] && S.hist[id].loading);
+  if (!items.length) return h('div', { class: 'empty' }, busy ? thinking() : 'No recent transactions.');
+  return h('div', { class: 'tx-list' }, items.map(txRow));
+}
+
+function renderHistory() {
+  if (S.page !== 'history') return;
+  const asset = S.histAsset && byId(S.histAsset);
+  $('#netTitle').textContent = 'History';
+  const ids = asset ? [asset.id] : S.accounts.map(a => a.id);
+  ensureHistory(ids);
+  let items = mergedHistory(ids);
+  if (S.histFilter === 'in') items = items.filter(i => i.dir === 'in');
+  if (S.histFilter === 'out') items = items.filter(i => i.dir === 'out');
+  const busy = ids.filter(id => S.hist[id] && S.hist[id].loading).length;
+  const seg = h('div', { class: 'seg' }, [['all', 'All'], ['in', 'Received'], ['out', 'Sent']].map(([k, label]) =>
+    h('button', { class: S.histFilter === k ? 'on' : '', onclick: () => { S.histFilter = k; renderHistory(); } }, label)));
+  // Group rows by day.
+  const list = [];
+  let day = null;
+  for (const it of items.slice(0, 200)) {
+    const d = it.time ? new Date(it.time * 1000).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' }) : 'Pending';
+    if (d !== day) { list.push(h('div', { class: 'tx-day', text: d })); day = d; }
+    list.push(txRow(it));
+  }
+  const notes = ids.map(id => [byId(id), S.hist[id]]).filter(([a, s]) => a && s && (s.unavailable || s.error))
+    .map(([a, s]) => h('div', { text: `${a.symbol} · ${a.network}: ${s.unavailable || s.error}` }));
+  $('#view').replaceChildren(
+    h('div', { class: 'home-top' }, h('div', { class: 'label', text: 'Transactions' }),
+      h('div', { class: 'balance', text: asset ? `${asset.symbol} history` : 'Recent activity' })),
+    h('div', { class: 'hist-tools' }, seg,
+      asset ? h('span', { class: 'filter-chip' }, `${asset.symbol} · ${asset.network}`,
+        h('button', { title: 'Show all assets', onclick: () => go('history') }, icon('i-x'))) : null,
+      h('span', { class: 'spacer' }),
+      busy ? h('span', { class: 'note' }, thinking(true), ` loading ${busy} of ${ids.length}…`) : null,
+      h('button', { class: 'link-btn', onclick: () => { ensureHistory(ids, true); renderHistory(); } }, icon('i-refresh'), 'Refresh')),
+    list.length ? h('div', { class: 'tx-list' }, list)
+      : h('div', { class: 'empty' }, busy ? thinking() : 'No transactions found.'),
+    notes.length ? h('div', { class: 'hist-notes' }, notes) : null);
+}
+
+/* ---- balances ---- */
 async function refreshOne(id) {
   const gen = S.gen;
   S.bal[id] = '…'; showBal(id);
@@ -282,7 +623,8 @@ async function refreshOne(id) {
 }
 
 async function refreshAll() {
-  const btn = $('#refreshBtn'); btn.classList.add('busy');
+  const btn = $('#topRefresh'); btn.classList.add('busy');
+  loadPrices();
   const byNet = new Map();
   for (const a of S.accounts) { if (!byNet.has(a.network)) byNet.set(a.network, []); byNet.get(a.network).push(a.id); }
   // Networks in parallel, assets within a network one by one (kinder to public APIs).
@@ -300,8 +642,8 @@ async function copyText(text) {
 }
 
 async function lockNow(msg) {
-  closeModal();
-  S.gen++; S.accounts = []; S.bal = {}; S.cur = null;
+  closeModal(); togglePf(false);
+  S.gen++; S.accounts = []; S.bal = {}; S.cur = null; S.hist = {}; S.prices = null;
   try { await call('lock'); } catch { /* already locked */ }
   showUnlock(msg);
 }
@@ -418,7 +760,8 @@ async function openSettings() {
         h('dt', { text: 'Monero node' }), h('dd', { text: s.monero_daemon || '—' })),
       s.monero_error ? h('div', { class: 'err', text: s.monero_error }) : null,
       h('p', { class: 'note' },
-        'Endpoints, tokens, auto-lock and Monero are set in the config file. To enable Monero, download the official CLI from getmonero.org, verify it, then set ',
+        'Endpoints, tokens, auto-lock, prices, the optional ', h('code', { text: 'etherscan_api_key' }),
+        ' (history on Base, Arbitrum, Polygon and BNB Chain) and Monero are set in the config file. To enable Monero, download the official CLI from getmonero.org, verify it, then set ',
         h('code', { text: 'monero.enabled' }), ', ', h('code', { text: 'wallet_rpc_path' }), ' and ', h('code', { text: 'daemon' }),
         '. Lock and unlock to apply changes.')),
     h('div', { class: 'm-foot' },
@@ -429,20 +772,27 @@ async function openSettings() {
 }
 
 /* ---------------- Global wiring ---------------- */
-$('#refreshBtn').onclick = refreshAll;
+$('#topRefresh').onclick = refreshAll;
 $('#lockBtn').onclick = () => lockNow();
 $('#settingsBtn').onclick = openSettings;
+$('#navHome').onclick = () => go('home');
+$('#navHistory').onclick = () => go('history');
+$('#topHistory').onclick = () => go('history');
+$('#pfBtn').onclick = e => { e.stopPropagation(); togglePf(); };
+document.addEventListener('mousedown', e => { if (!e.target.closest('#pfDD, #pfBtn')) togglePf(false); });
 $('#toggleSide').onclick = () => $('#app').classList.toggle('collapsed');
 $('#acctSearch').addEventListener('input', renderSidebar);
 window.__locked = () => { if (!$('#app').hidden) lockNow('Locked after inactivity.'); };
 document.addEventListener('keydown', e => {
-  const k = e.key.toLowerCase();
-  if ((e.ctrlKey || e.metaKey) && (k === 'r' || k === 'p')) e.preventDefault();  // no reload / print
+  const k = e.key.toLowerCase(), mod = e.ctrlKey || e.metaKey;
+  if (mod && (k === 'r' || k === 'p' || k === 'h' || k === 'y')) e.preventDefault();  // no reload / print / browser history
   if (e.key === 'F5') e.preventDefault();
   if ($('#app').hidden) return;
-  if ((e.ctrlKey || e.metaKey) && k === 'r') refreshAll();
-  if ((e.ctrlKey || e.metaKey) && k === 'l') { e.preventDefault(); lockNow(); }
-  if (e.key === 'Escape') closeModal();
+  if (mod && k === 'r') refreshAll();
+  if (mod && k === 'h') go('home');
+  if (mod && k === 'y') go('history');
+  if (mod && k === 'l') { e.preventDefault(); lockNow(); }
+  if (e.key === 'Escape') { closeModal(); togglePf(false); }
 });
 document.addEventListener('contextmenu', e => { if (!e.target.closest('input, textarea, .sel')) e.preventDefault(); });
 let lastPing = 0;

@@ -9,7 +9,7 @@ from tonsdk.contract.wallet import WalletV4ContractR2
 from tonsdk.utils import Address
 
 from .. import net
-from .base import Asset, Chain, InsufficientFunds, PreparedTx
+from .base import Asset, Chain, HistoryItem, InsufficientFunds, PreparedTx
 
 FEE_RESERVE = 50_000_000  # 0.05 TON kept for fees (actual fees are usually ~0.005)
 
@@ -44,9 +44,6 @@ class TonChain(Chain):
 
     def address(self) -> str:
         return self._addr
-
-    def tx_url(self, txid: str) -> str:
-        return self.address_url()
 
     def _headers(self) -> dict:
         return {"X-API-Key": self.api_key} if self.api_key else {}
@@ -105,3 +102,19 @@ class TonChain(Chain):
 
         return PreparedTx(self.name, asset, self._addr, to.strip(), amount, 10_000_000,
                           "(estimate)", self.native, send, warnings)
+
+    def tx_url(self, txid: str) -> str:
+        return f"{self.explorer_addr.rsplit('/', 1)[0]}/transaction/{txid}" if len(txid) == 64 else self.address_url()
+
+    def history(self, asset: Asset, limit: int = 20) -> list[HistoryItem]:
+        out = []
+        for t in self._get("getTransactions", address=self._addr, limit=limit):
+            h = base64.b64decode(t["transaction_id"]["hash"]).hex()
+            inm, outs = t.get("in_msg") or {}, t.get("out_msgs") or []
+            sent = sum(int(m.get("value") or 0) for m in outs)
+            got = int(inm.get("value") or 0) if inm.get("source") else 0
+            if outs:
+                out.append(HistoryItem(h, t.get("utime"), "out", sent, outs[0].get("destination", "")))
+            elif got:
+                out.append(HistoryItem(h, t.get("utime"), "in", got, inm.get("source", "")))
+        return out

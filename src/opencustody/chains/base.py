@@ -50,6 +50,20 @@ class PreparedTx:
         return self._broadcast()
 
 
+@dataclass
+class HistoryItem:
+    txid: str
+    time: int | None  # unix seconds; None while pending
+    direction: str  # "in" | "out" | "self"
+    amount: int  # base units of the asset, always >= 0
+    counterparty: str = ""
+    status: str = "confirmed"  # "confirmed" | "pending" | "failed"
+
+
+class HistoryUnavailable(Exception):
+    pass
+
+
 class Chain:
     key: str = ""
     name: str = ""
@@ -75,6 +89,10 @@ class Chain:
         raise NotImplementedError
 
     supports_max = False
+
+    def history(self, asset: Asset, limit: int = 25) -> list[HistoryItem]:
+        """Recent transactions, newest first."""
+        raise HistoryUnavailable(f"History isn't available for {self.name}; use the explorer.")
 
     def tx_url(self, txid: str) -> str:
         return self.explorer_tx.format(txid)

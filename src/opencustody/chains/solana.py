@@ -12,7 +12,7 @@ from solders.system_program import TransferParams, transfer
 from solders.transaction import Transaction
 
 from ..net import JsonRpc
-from .base import Asset, Chain, InsufficientFunds, PreparedTx
+from .base import Asset, Chain, HistoryItem, InsufficientFunds, PreparedTx
 
 
 def build_transfer(kp: Keypair, to: Pubkey, lamports: int, blockhash: str) -> Transaction:
@@ -84,3 +84,38 @@ class SolanaChain(Chain):
 
         return PreparedTx(self.name, asset, self.address(), str(to_pk), amount, int(fee), "",
                           self.native, send, warnings)
+
+    def history(self, asset: Asset, limit: int = 10) -> list[HistoryItem]:
+        me = self.address()
+        sigs = self.rpc.call("getSignaturesForAddress", [me, {"limit": 20}]) or []
+        out = []
+        for s in sigs:
+            if len(out) >= limit:
+                break
+            sig = s["signature"]
+            item = HistoryItem(sig, s.get("blockTime"), "in", 0, "",
+                               "failed" if s.get("err") else "confirmed")
+            try:
+                tx = self.rpc.call("getTransaction", [sig, {"encoding": "jsonParsed", "commitment": "confirmed",
+                                                            "maxSupportedTransactionVersion": 0}])
+            except Exception:
+                tx = None
+            if tx and tx.get("meta"):
+                keys = [k["pubkey"] if isinstance(k, dict) else k for k in tx["transaction"]["message"]["accountKeys"]]
+                pre, post = tx["meta"]["preBalances"], tx["meta"]["postBalances"]
+                if me in keys:
+                    i = keys.index(me)
+                    delta = post[i] - pre[i]
+                    item.direction = "in" if delta > 0 else "out"
+                    item.amount = abs(delta)
+                    deltas = [(post[j] - pre[j], keys[j]) for j in range(len(keys)) if j != i]
+                    if deltas:
+                        d, k = (max if delta < 0 else min)(deltas)
+                        if (d > 0) == (delta < 0) and d != 0:
+                            item.counterparty = k
+                if item.amount == 0:
+                    continue  # spam/memo transactions that didn't move our SOL
+            else:
+                item.direction = "unknown"  # couldn't load details; still list it
+            out.append(item)
+        return out

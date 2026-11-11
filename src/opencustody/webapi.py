@@ -18,10 +18,10 @@ import time
 import webbrowser
 from typing import Callable
 
-from . import __version__, config, vault
+from . import __version__, config, portfolios, prices, vault
 from .amounts import fmt, to_base_units
 from .chains import build_chains, build_monero
-from .chains.base import Asset, Chain, PreparedTx
+from .chains.base import Asset, Chain, HistoryUnavailable, PreparedTx
 from .keys import Keyring, is_valid_mnemonic, new_mnemonic, normalize_mnemonic
 from .paths import config_path, vault_path
 
@@ -63,6 +63,8 @@ class WalletApi:
         self._session = 0
         self._monero_state = "off"
         self._monero_error = ""
+        self._portfolio = 0
+        self._build_errors: list[str] = []
         self.on_locked: Callable[[], None] | None = None
         threading.Thread(target=self._autolock_loop, daemon=True).start()
 
@@ -141,11 +143,109 @@ class WalletApi:
         with self._lock:
             self._cfg = config.load()
             self._keyring = Keyring(s.mnemonic, s.passphrase)
-            self._chains, errors = build_chains(self._cfg, self._keyring)
-            self._index_accounts()
-            self._build_errors = errors
-            self._monero_state = "off" if not self._cfg["monero"].get("enabled") else "idle"
             self._last_activity = time.monotonic()
+            self._load_portfolio(portfolios.load()["active"])
+
+    def _close_chains(self) -> None:
+        chains, self._chains = self._chains, []
+        self._accounts = {}
+        self._prepared.clear()
+        for c in chains:
+            try:
+                c.close()
+            except Exception:  # nosec B110 - best-effort shutdown
+                pass
+
+    def _load_portfolio(self, n: int) -> None:
+        self._session += 1
+        self._close_chains()
+        self._portfolio = n
+        self._chains, self._build_errors = build_chains(self._cfg, self._keys())
+        self._index_accounts()
+        self._monero_state = "off" if not self._cfg["monero"].get("enabled") else "idle"
+        self._monero_error = ""
+
+    def _keys(self):
+        if not self._keyring:
+            raise RuntimeError("Wallet is locked.")
+        return self._keyring.portfolio(self._portfolio)
+
+    # ---- portfolios -----------------------------------------------------------------
+    @_safe
+    def portfolios(self) -> dict:
+        d = portfolios.load()
+        return _ok(active=self._portfolio if self._keyring else d["active"], items=d["items"])
+
+    @_safe
+    def switch_portfolio(self, n: int) -> dict:
+        n = int(n)
+        d = portfolios.load()
+        if n not in {i["n"] for i in d["items"]}:
+            return _err("Unknown portfolio.")
+        with self._lock:
+            self._keys()
+            self._load_portfolio(n)
+            d["active"] = n
+            portfolios.save(d)
+        return _ok()
+
+    @_safe
+    def create_portfolio(self, name: str) -> dict:
+        self._keys()
+        d = portfolios.load()
+        n = portfolios.add(d, name)
+        portfolios.save(d)
+        self.switch_portfolio(n)
+        return _ok(n=n)
+
+    @_safe
+    def rename_portfolio(self, n: int, name: str) -> dict:
+        d = portfolios.load()
+        for i in d["items"]:
+            if i["n"] == int(n):
+                i["name"] = portfolios.clean_name(name)
+                portfolios.save(d)
+                return _ok()
+        return _err("Unknown portfolio.")
+
+    @_safe
+    def remove_portfolio(self, n: int) -> dict:
+        """Hides a portfolio from the list. Its funds stay on-chain and it can be re-added."""
+        n = int(n)
+        if n == 0:
+            return _err("The main portfolio can't be removed.")
+        d = portfolios.load()
+        d["items"] = [i for i in d["items"] if i["n"] != n]
+        if d["active"] == n:
+            d["active"] = 0
+        portfolios.save(d)
+        if self._keyring and self._portfolio == n:
+            with self._lock:
+                self._load_portfolio(0)
+        return _ok()
+
+    # ---- prices & history -----------------------------------------------------------
+    @_safe
+    def prices(self) -> dict:
+        p = self._cfg.get("prices", {})
+        if not p.get("enabled", True):
+            return _ok(enabled=False, prices={})
+        syms = sorted({a.symbol for _, a in self._accounts.values()} | {"XMR"})
+        return _ok(enabled=True, prices=prices.fetch(p.get("api", "https://api.coingecko.com/api/v3"), syms),
+                   updated=int(time.time()))
+
+    @_safe
+    def history(self, aid: str) -> dict:
+        chain, asset = self._get(aid)
+        try:
+            items = chain.history(asset)
+        except HistoryUnavailable as e:
+            return _ok(items=[], unavailable=str(e))
+        return _ok(items=[{
+            "id": aid, "txid": i.txid, "time": i.time, "dir": i.direction,
+            "amount": fmt(i.amount, asset.decimals), "symbol": asset.symbol, "network": chain.name,
+            "counterparty": i.counterparty, "status": i.status, "url": chain.tx_url(i.txid),
+        } for i in items])
 
     def _index_accounts(self) -> None:
         self._accounts = {}
@@ -157,15 +257,8 @@ class WalletApi:
     def lock(self) -> dict:
         with self._lock:
             self._session += 1
-            chains, self._chains = self._chains, []
-            self._accounts = {}
-            self._prepared.clear()
+            self._close_chains()
             self._pending_mnemonic = None
-            for c in chains:
-                try:
-                    c.close()
-                except Exception:  # nosec B110 - best-effort shutdown
-                    pass
             if self._keyring:
                 self._keyring.wipe()
             self._keyring = None
@@ -184,7 +277,8 @@ class WalletApi:
                 "max": bool(chain.supports_max and asset.contract is None),
             })
         notes = list(getattr(self, "_build_errors", []))
-        return _ok(accounts=out, notes=notes, monero=self._monero_state, monero_error=self._monero_error)
+        return _ok(accounts=out, notes=notes, monero=self._monero_state, monero_error=self._monero_error,
+                   portfolio=self._portfolio)
 
     @_safe
     def balance(self, aid: str) -> dict:
@@ -216,7 +310,7 @@ class WalletApi:
                 from .chains.monero import daemon_height
                 tip = daemon_height(self._cfg["monero"]["daemon"])
                 height = max(0, tip - (int(time.time()) - int(meta.get("created_at", 0))) // 120 - 2000)
-            chain = build_monero(self._cfg, self._keyring, height)
+            chain = build_monero(self._cfg, self._keys(), height)
         except Exception as e:
             self._monero_state, self._monero_error = "error", str(e)
             return _err(e)
