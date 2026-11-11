@@ -19,6 +19,7 @@ dependencies = [
     "eth-keys==0.8.0",
     "eth-utils==6.0.0",
     "PyNaCl==1.6.2",
+    "pywebview==6.2.1",
     "solders==0.29.0",
     "tonsdk==1.0.15",
 ]
@@ -31,6 +32,9 @@ opencustody = "opencustody.gui:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+opencustody = ["web/*.html", "web/*.css", "web/*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -35,6 +35,19 @@ No software can promise "zero vulnerabilities", and this project does not. What 
 * Privacy leaks to public API providers (see the README's Privacy section).
 * Losing your recovery phrase. Nobody can recover it for you.
 
+## User interface
+
+The window is an HTML page rendered by the operating system's web view (via `pywebview`).
+* The page loads only bundled local files over a private 127.0.0.1 port and runs under a strict
+  Content-Security-Policy: no inline scripts, no `eval`, and `connect-src 'none'`, so the UI itself
+  cannot make network requests. Every network call happens in Python.
+* The page can only call the methods of `WalletApi` (`webapi.py`). It never receives the seed or
+  private keys. It only sees addresses, balances, and the words while you are creating a backup.
+* All data is inserted into the page with `textContent`, never as HTML.
+* Signed transactions stay in Python behind a single-use random token. A review can be sent only
+  once, and locking the wallet discards it.
+* Private mode: the web view persists no cookies, cache or storage. Dev tools are disabled.
+
 ## Cryptography and dependencies
 
 | Purpose | Library |

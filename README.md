@@ -28,7 +28,9 @@ An open-source, self-custodial desktop wallet for **Bitcoin, Litecoin, Ethereum 
 
 ## Install & run
 
-Requires Python 3.11+ (with Tk, which the python.org installers include).
+Requires Python 3.11+ and the system web view: Edge WebView2 (preinstalled on Windows 10/11),
+WebKit on macOS (built in), or GTK WebKit2 / Qt WebEngine on Linux (see the
+[pywebview docs](https://pywebview.flowrl.com/guide/installation.html)).
 
 ```bash
 git clone https://github.com/<you>/opencustody.git
@@ -107,6 +109,10 @@ bandit -r src -c pyproject.toml
 ```bash
 pip-audit
 ```
+
+To work on the interface without Python or keys, serve `src/opencustody/web/` with any static
+server and open `index.html?mock` (`?mock&unlocked` skips to the wallet). That loads
+`dev-mock.js`, a fake bridge with sample data. The real app never loads it.
 
 CI runs these on every push (see `.github/workflows/ci.yml`), along with CodeQL.
 
